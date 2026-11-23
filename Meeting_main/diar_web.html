@@ -4,307 +4,1254 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
-  <title>会议实时记录</title>
+  <title>会议实时记录 · 简洁智能纪要</title>
   <style>
     :root {
       color-scheme: light;
-      --ink: #202a26;
-      --muted: #758078;
-      --line: #e2e8e3;
-      --paper: #f8f9f7;
-      --surface: #fff;
-      --accent: #466b5a;
-      --accent-hover: #365744;
-      --accent-soft: #edf4ef;
-      --pending: #8f6839;
-      --error: #a34c45;
-      font-family: "Segoe UI", "Microsoft YaHei UI", "PingFang SC", sans-serif;
+      --bg: #f6f7f5;
+      --surface: #ffffff;
+      --surface-subtle: #f1f3f0;
+      --ink: #18201c;
+      --ink-secondary: #43514a;
+      --muted: #606e67;
+      --border: #e2e7e3;
+      --border-strong: #c6d0c9;
+      --accent: #2f5d4a;
+      --accent-hover: #244a3b;
+      --accent-soft: #ecf4ef;
+      --accent-ring: rgba(47, 93, 74, 0.22);
+      --live: #dc2626;
+      --live-soft: #fef2f2;
+      --warn: #925b1d;
+      --warn-soft: #fbf4e8;
+      --danger: #b4362c;
+      --danger-soft: #fdf1f0;
+      --hit-bg: #fef0c7;
+      --hit-ink: #713f12;
+      --radius-sm: 6px;
+      --radius-md: 10px;
+      --radius-pill: 999px;
+      --shadow-xs: 0 1px 2px rgba(24, 32, 28, 0.04);
+      --shadow-menu: 0 10px 28px rgba(24, 32, 28, 0.09), 0 1px 3px rgba(24, 32, 28, 0.06);
+      font-family: "Inter", "PingFang SC", "Microsoft YaHei UI", "Segoe UI", -apple-system, sans-serif;
     }
 
     * { box-sizing: border-box; }
-    body { margin: 0; min-width: 320px; background: var(--paper); color: var(--ink); }
-    button, input, select { font: inherit; }
-    .shell { width: min(100% - 48px, 1080px); margin: 0 auto; padding: 34px 0 48px; }
+    html { -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; }
+    body {
+      margin: 0;
+      min-width: 320px;
+      background: var(--bg);
+      color: var(--ink);
+      line-height: 1.5;
+    }
+    button, input, select { font: inherit; color: inherit; }
+    button { cursor: pointer; }
+    button:disabled { cursor: not-allowed; opacity: 0.46; }
+    svg.icon {
+      width: 15px;
+      height: 15px;
+      flex: 0 0 auto;
+      stroke: currentColor;
+      fill: none;
+      stroke-width: 1.8;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+    svg.icon-sm { width: 13px; height: 13px; }
+    svg.icon-fill { fill: currentColor; stroke: none; }
 
-    .page-header, .action-row, .audio-row, .transcript-heading, .utterance-meta, .backfill-heading {
+    .shell {
+      width: min(100% - 40px, 960px);
+      margin: 0 auto;
+      padding: 26px 0 64px;
+    }
+
+    /* 1. 顶部极简导航栏 */
+    .topbar {
       display: flex;
       align-items: center;
       justify-content: space-between;
       gap: 16px;
+      padding-bottom: 18px;
+      margin-bottom: 18px;
+      border-bottom: 1px solid var(--border);
     }
-    .page-header { padding-bottom: 22px; border-bottom: 1px solid var(--line); }
-    h1 { margin: 0; font-size: clamp(25px, 3vw, 32px); font-weight: 650; letter-spacing: -.035em; line-height: 1.2; }
-    .subtitle { margin: 8px 0 0; color: var(--muted); font-size: 13px; line-height: 1.6; }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 11px;
+      min-width: 0;
+    }
+    .brand-mark {
+      width: 34px;
+      height: 34px;
+      border-radius: 8px;
+      background: var(--accent);
+      color: #fff;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      flex: 0 0 auto;
+    }
+    .brand-mark svg { width: 18px; height: 18px; }
+    .brand-title-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    h1 {
+      margin: 0;
+      font-size: 20px;
+      font-weight: 650;
+      letter-spacing: -0.025em;
+      line-height: 1.2;
+      color: var(--ink);
+    }
     .state-tag {
       display: inline-flex;
-      flex: 0 0 auto;
+      align-items: center;
+      gap: 6px;
+      padding: 3px 10px;
+      border-radius: var(--radius-pill);
+      background: var(--surface-subtle);
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 500;
+      white-space: nowrap;
+      font-variant-numeric: tabular-nums;
+    }
+    .state-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: #92a099;
+    }
+    .state-tag.is-live { background: var(--live-soft); color: var(--live); }
+    .state-tag.is-live .state-dot {
+      background: var(--live);
+      animation: live-pulse 1.6s ease-in-out infinite;
+    }
+    .state-tag.is-busy { background: var(--accent-soft); color: var(--accent); }
+    .state-tag.is-busy .state-dot { background: var(--accent); }
+    .state-tag.is-done { background: var(--accent-soft); color: var(--accent); }
+    .state-tag.is-done .state-dot { background: var(--accent); }
+    .state-tag.is-error { background: var(--danger-soft); color: var(--danger); }
+    .state-tag.is-error .state-dot { background: var(--danger); }
+
+    .topbar-tools {
+      display: flex;
       align-items: center;
       gap: 8px;
-      min-height: 30px;
-      color: var(--muted);
-      font-size: 11px;
+      flex: 0 1 auto;
+      min-width: 0;
+    }
+    .history-wrap {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      min-width: 0;
+    }
+    .select-box {
+      height: 36px;
+      max-width: 280px;
+      padding: 0 30px 0 12px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      background: var(--surface) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%23606e67' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E") no-repeat right 10px center;
+      appearance: none;
+      -webkit-appearance: none;
+      color: var(--ink-secondary);
+      font-size: 13px;
+      font-weight: 500;
+      line-height: 34px;
       white-space: nowrap;
-    }
-    .state-dot { width: 7px; height: 7px; border-radius: 50%; background: #99a39c; }
-    .state-tag.is-live { color: var(--accent); }
-    .state-tag.is-live .state-dot { background: #73a288; }
-    .state-tag.is-done .state-dot { background: #8b9690; }
-    .state-tag.is-error { color: var(--error); }
-    .state-tag.is-error .state-dot { background: var(--error); }
-
-    .action-row { justify-content: flex-start; gap: 9px; padding: 18px 0 14px; flex-wrap: wrap; }
-    .action-spacer { margin-left: auto; display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-    .button, .select-box {
-      min-height: 36px;
-      padding: 0 13px;
-      border: 1px solid #d6ded8;
-      border-radius: 6px;
-      background: var(--surface);
-      color: #43534a;
-      cursor: pointer;
-      font-size: 12px;
-      font-weight: 600;
-      transition: background .14s ease, border-color .14s ease;
-    }
-    .button:hover, .select-box:hover { border-color: #b8c8bd; background: #f5f8f5; }
-    .button:focus-visible, .select-box:focus-visible { outline: 3px solid rgba(70,107,90,.2); outline-offset: 2px; }
-    .button-primary { border-color: var(--accent); background: var(--accent); color: white; }
-    .button-primary:hover { border-color: var(--accent-hover); background: var(--accent-hover); }
-    .button-danger { color: #79524d; }
-    .button:disabled { cursor: default; opacity: .48; }
-
-    .audio-sim {
-      display: grid;
-      grid-template-columns: 125px minmax(0, 1fr);
-      align-items: center;
-      gap: 14px;
-      min-height: 56px;
-      margin-bottom: 18px;
-      padding: 9px 13px;
-      border: 1px solid var(--line);
-      border-radius: 7px;
-      background: rgba(255,255,255,.66);
-    }
-    .audio-title { color: #526158; font-size: 11px; font-weight: 650; }
-    .audio-caption { display: block; margin-top: 3px; color: #8a958e; font-size: 9px; font-weight: 400; }
-    .audio-row { justify-content: flex-start; min-width: 0; gap: 10px; }
-    .file-button {
-      display: inline-flex;
-      flex: 0 0 auto;
-      align-items: center;
-      min-height: 30px;
-      padding: 0 10px;
-      border: 1px solid #dce3dd;
-      border-radius: 5px;
-      background: white;
-      color: #526158;
-      cursor: pointer;
-      font-size: 10px;
-      font-weight: 550;
-    }
-    .file-button:hover { border-color: #bac9bf; }
-    .file-button input { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; clip-path: inset(50%); }
-    .file-button:focus-within { outline: 3px solid rgba(70,107,90,.2); outline-offset: 2px; }
-    .file-name { min-width: 0; overflow: hidden; color: var(--muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
-    .sim-actions { display: inline-flex; align-items: center; gap: 8px; margin-left: auto; flex: 0 0 auto; }
-    .simulate-button { min-height: 30px; padding: 0 10px; font-size: 10px; }
-
-    .transcript-panel {
-      min-height: 420px;
-      padding: 0 24px;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: var(--surface);
-    }
-    .transcript-heading { min-height: 55px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
-    .transcript-heading h2 { margin: 0; font-size: 13px; font-weight: 650; }
-    .heading-tools { display: inline-flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-    .view-switcher {
-      display: inline-flex;
-      border: 1px solid var(--line);
-      border-radius: 5px;
       overflow: hidden;
-      background: var(--paper);
+      text-overflow: ellipsis;
+      cursor: pointer;
+      transition: border-color 160ms ease, background-color 160ms ease;
+    }
+    .select-box:hover { border-color: var(--border-strong); }
+    .select-box:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+    /* 按钮体系（单体系：主按钮 / 次按钮 / 图标按钮 / 停止录音语义红） */
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 7px;
+      height: 38px;
+      padding: 0 15px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      background: var(--surface);
+      color: var(--ink-secondary);
+      font-size: 13.5px;
+      font-weight: 550;
+      white-space: nowrap;
+      transition: background 160ms ease, border-color 160ms ease, color 160ms ease, transform 120ms ease;
+    }
+    .btn:hover:not(:disabled) {
+      border-color: var(--border-strong);
+      background: var(--surface-subtle);
+      color: var(--ink);
+    }
+    .btn:active:not(:disabled) { transform: translateY(1px); }
+    .btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+    .btn-primary {
+      border-color: var(--accent);
+      background: var(--accent);
+      color: #ffffff;
+    }
+    .btn-primary:hover:not(:disabled) {
+      border-color: var(--accent-hover);
+      background: var(--accent-hover);
+      color: #ffffff;
+    }
+    .btn-stop {
+      border-color: #f3c8c5;
+      background: var(--live-soft);
+      color: var(--live);
+    }
+    .btn-stop:hover:not(:disabled) {
+      border-color: #e9a39e;
+      background: #fee2e2;
+      color: #b91c1c;
+    }
+    .btn-sm { height: 32px; padding: 0 11px; font-size: 12.5px; gap: 5px; }
+    .btn-icon {
+      width: 36px;
+      height: 36px;
+      padding: 0;
+    }
+    .btn-icon.btn-danger-ghost:hover:not(:disabled) {
+      border-color: #e9b7b3;
+      background: var(--danger-soft);
+      color: var(--danger);
+    }
+
+    /* 更多选项折叠菜单（把工程师/调试功能干净藏起来） */
+    .more-menu { position: relative; }
+    .more-menu summary {
+      list-style: none;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 36px;
+      height: 36px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      background: var(--surface);
+      color: var(--ink-secondary);
+      cursor: pointer;
+      transition: border-color 160ms ease, background 160ms ease;
+    }
+    .more-menu summary::-webkit-details-marker { display: none; }
+    .more-menu summary:hover { border-color: var(--border-strong); background: var(--surface-subtle); color: var(--ink); }
+    .more-menu summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .more-popover {
+      position: absolute;
+      top: calc(100% + 8px);
+      right: 0;
+      z-index: 40;
+      width: 248px;
+      padding: 12px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-md);
+      background: var(--surface);
+      box-shadow: var(--shadow-menu);
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .more-section-label {
+      font-size: 11.5px;
+      font-weight: 600;
+      color: var(--muted);
+      margin-bottom: 6px;
+    }
+    .view-switcher {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      padding: 2px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      background: var(--surface-subtle);
+      gap: 2px;
     }
     .view-btn {
-      min-height: 26px;
-      padding: 0 9px;
+      height: 28px;
+      padding: 0 4px;
       border: 0;
+      border-radius: 4px;
       background: transparent;
       color: var(--muted);
+      font-size: 12px;
+      font-weight: 500;
+      transition: background 140ms ease, color 140ms ease;
+    }
+    .view-btn:hover { color: var(--ink); }
+    .view-btn.is-active {
+      background: var(--surface);
+      color: var(--accent);
+      font-weight: 600;
+      box-shadow: var(--shadow-xs);
+    }
+    .more-divider { height: 1px; background: var(--border); margin: 2px 0; }
+    .more-item-btn {
+      width: 100%;
+      justify-content: flex-start;
+      height: 34px;
+      padding: 0 10px;
+      border-color: transparent;
+      background: transparent;
+      font-size: 13px;
+    }
+    .more-item-btn:hover:not(:disabled) {
+      border-color: transparent;
+      background: var(--surface-subtle);
+    }
+
+    /* 2. 主操作条（开始录音 + 拖入/导入音频，两条主路径一眼懂） */
+    .workspace-bar {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      padding: 14px 18px;
+      margin-bottom: 18px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-md);
+      background: var(--surface);
+      box-shadow: var(--shadow-xs);
+      transition: border-color 180ms ease, background 180ms ease;
+    }
+    .workspace-bar.is-dragover {
+      border-color: var(--accent);
+      border-style: dashed;
+      background: var(--accent-soft);
+    }
+    .record-group {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      flex: 0 0 auto;
+    }
+    .bar-divider {
+      width: 1px;
+      height: 24px;
+      background: var(--border);
+      flex: 0 0 auto;
+    }
+    .import-group {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex: 1 1 auto;
+      min-width: 0;
+    }
+    .file-label {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      height: 38px;
+      padding: 0 13px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      background: var(--surface);
+      color: var(--ink-secondary);
+      font-size: 13.5px;
+      font-weight: 550;
       cursor: pointer;
-      font-size: 11px;
+      white-space: nowrap;
+      transition: border-color 160ms ease, background 160ms ease, color 160ms ease;
+    }
+    .file-label:hover {
+      border-color: var(--border-strong);
+      background: var(--surface-subtle);
+      color: var(--ink);
+    }
+    .file-label:focus-within { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .file-label input {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      clip-path: inset(50%);
+    }
+    .file-name {
+      min-width: 0;
+      flex: 1 1 auto;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .file-name.has-file { color: var(--ink); font-weight: 500; }
+
+    /* 进度提示条与轻量消息条 */
+    .progress-banner {
+      margin-bottom: 16px;
+      padding: 14px 18px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-md);
+      background: var(--surface);
+    }
+    .progress-banner[hidden] { display: none; }
+    .progress-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      font-size: 13px;
+      color: var(--ink-secondary);
+      font-weight: 500;
+    }
+    .progress-value {
+      color: var(--accent);
+      font-size: 12.5px;
+      font-weight: 600;
+      font-variant-numeric: tabular-nums;
+    }
+    .progress-track {
+      height: 4px;
+      margin: 10px 0 6px;
+      border-radius: var(--radius-pill);
+      background: var(--surface-subtle);
+      overflow: hidden;
+    }
+    .progress-fill {
+      width: 0;
+      height: 100%;
+      border-radius: var(--radius-pill);
+      background: var(--accent);
+      transition: width 220ms ease;
+    }
+    .progress-status {
+      margin: 0;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .notice {
+      display: none;
+      margin-bottom: 16px;
+      padding: 10px 14px;
+      border-radius: var(--radius-sm);
+      background: var(--warn-soft);
+      color: var(--warn);
+      font-size: 13px;
+      line-height: 1.55;
+    }
+    .notice.is-visible { display: block; }
+    .notice.is-error { background: var(--danger-soft); color: var(--danger); }
+    .notice.is-success { background: var(--accent-soft); color: var(--accent); }
+
+    /* 3. 会后小秘书纪要卡片 */
+    .summary-card {
+      margin-bottom: 18px;
+      padding: 24px 28px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-md);
+      background: var(--surface);
+      box-shadow: var(--shadow-xs);
+    }
+    .summary-card[hidden] { display: none; }
+    .summary-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 16px;
+      padding-bottom: 16px;
+      border-bottom: 1px solid var(--border);
+    }
+    .summary-kicker {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      color: var(--accent);
+      font-size: 12px;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+    }
+    .summary-title {
+      margin: 5px 0 0;
+      font-size: 19px;
+      font-weight: 650;
+      letter-spacing: -0.02em;
+      line-height: 1.35;
+      color: var(--ink);
+    }
+    .summary-actions {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      flex: 0 0 auto;
+    }
+    .summary-overview {
+      margin: 16px 0 0;
+      padding: 14px 16px;
+      border-left: 3px solid var(--accent);
+      border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+      background: var(--accent-soft);
+      color: #21372d;
+      font-size: 14.5px;
+      line-height: 1.8;
+    }
+    .summary-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 20px;
+      margin-top: 20px;
+    }
+    .summary-block h3 {
+      margin: 0 0 10px;
+      color: var(--muted);
+      font-size: 12.5px;
+      font-weight: 650;
+      letter-spacing: 0.02em;
+    }
+    .summary-list {
+      margin: 0;
+      padding-left: 18px;
+      color: var(--ink);
+      font-size: 14px;
+      line-height: 1.75;
+    }
+    .summary-list li + li { margin-top: 6px; }
+    .action-list {
+      margin: 0;
+      padding: 0;
+      list-style: none;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .action-item {
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+      font-size: 14px;
+      line-height: 1.65;
+      color: var(--ink);
+    }
+    .action-owner {
+      display: inline-block;
+      flex: 0 0 auto;
+      padding: 1px 8px;
+      border-radius: 4px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-size: 12px;
+      font-weight: 600;
+      margin-top: 2px;
+    }
+    .action-deadline {
+      color: var(--muted);
+      font-size: 12.5px;
+      margin-left: 4px;
+    }
+    .topic-group { margin-top: 20px; }
+    .topic-items {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 16px;
+    }
+    .topic-item {
+      padding: 14px 16px;
+      border-radius: var(--radius-sm);
+      background: var(--bg);
+    }
+    .topic-name {
+      font-size: 14px;
+      font-weight: 650;
+      color: var(--ink);
+      margin-bottom: 6px;
+    }
+    .summary-empty {
+      margin: 16px 0 0;
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.7;
+    }
+
+    /* 参会发言人名片条（筛选 + 改名分离，互不误触） */
+    .speakers-bar {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 18px;
+      padding-top: 16px;
+      border-top: 1px solid var(--border);
+    }
+    .speakers-bar[hidden] { display: none; }
+    .speakers-bar-label {
+      color: var(--muted);
+      font-size: 12.5px;
+      font-weight: 500;
+      margin-right: 2px;
+    }
+    .speaker-all-btn {
+      display: inline-flex;
+      align-items: center;
+      height: 30px;
+      padding: 0 11px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-pill);
+      background: var(--surface);
+      color: var(--ink-secondary);
+      font-size: 12.5px;
+      font-weight: 500;
+      transition: background 150ms ease, border-color 150ms ease, color 150ms ease;
+    }
+    .speaker-all-btn:hover { border-color: var(--border-strong); color: var(--ink); }
+    .speaker-all-btn[aria-pressed="true"] {
+      border-color: var(--accent);
+      background: var(--accent);
+      color: #fff;
+    }
+    .speaker-all-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+    .speaker-chip {
+      display: inline-flex;
+      align-items: center;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-pill);
+      background: var(--bg);
+      overflow: hidden;
+      transition: border-color 150ms ease, background 150ms ease;
+    }
+    .speaker-chip.is-active {
+      border-color: var(--accent);
+      background: var(--accent-soft);
+    }
+    .speaker-filter-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      height: 30px;
+      padding: 0 8px 0 11px;
+      border: 0;
+      background: transparent;
+      color: var(--ink);
+      font-size: 12.5px;
       font-weight: 550;
     }
-    .view-btn.is-active { background: var(--accent); color: white; }
-    .tool-btn { min-height: 26px; padding: 0 9px; font-size: 11px; }
-    .utterance-count { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
-    .transcript-list { min-height: 320px; overflow: visible; }
-    .empty-state {
-      display: grid;
-      min-height: 300px;
-      align-content: center;
-      justify-items: center;
+    .speaker-filter-btn:hover { color: var(--accent); }
+    .speaker-filter-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: var(--radius-pill); }
+    .speaker-dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto; }
+    .speaker-role {
       color: var(--muted);
-      text-align: center;
+      font-size: 11.5px;
+      font-weight: 400;
+      max-width: 150px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
-    .empty-state strong { margin-bottom: 6px; color: #536158; font-size: 13px; font-weight: 600; }
-    .empty-state span { max-width: 420px; font-size: 11px; line-height: 1.7; }
+    .speaker-rename-btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 26px;
+      height: 30px;
+      padding: 0;
+      border: 0;
+      border-left: 1px solid rgba(24, 32, 28, 0.06);
+      background: transparent;
+      color: var(--muted);
+      transition: background 140ms ease, color 140ms ease;
+    }
+    .speaker-rename-btn:hover { background: rgba(47, 93, 74, 0.1); color: var(--accent); }
+    .speaker-rename-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+    .speaker-edit-wrap {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      height: 30px;
+      padding: 0 8px 0 10px;
+    }
+    .speaker-edit-input {
+      width: 108px;
+      height: 22px;
+      padding: 0 6px;
+      border: 1px solid var(--accent);
+      border-radius: 4px;
+      background: #fff;
+      color: var(--ink);
+      font-size: 12.5px;
+      outline: none;
+    }
+
+    /* 4. 极简音频回放条 */
+    .audio-bar {
+      position: sticky;
+      top: 12px;
+      z-index: 20;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 16px;
+      padding: 10px 16px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-md);
+      background: rgba(255, 255, 255, 0.96);
+      backdrop-filter: blur(8px);
+      box-shadow: 0 4px 16px rgba(24, 32, 28, 0.06);
+    }
+    .audio-bar[hidden] { display: none; }
+    .audio-play-btn {
+      width: 34px;
+      height: 34px;
+      border: 0;
+      border-radius: 50%;
+      background: var(--accent);
+      color: #fff;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      flex: 0 0 auto;
+      transition: background 150ms ease, transform 120ms ease;
+    }
+    .audio-play-btn:hover { background: var(--accent-hover); }
+    .audio-play-btn:active { transform: scale(0.96); }
+    .audio-play-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .audio-time {
+      font-size: 12.5px;
+      color: var(--ink-secondary);
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+      min-width: 84px;
+    }
+    .audio-seek {
+      flex: 1 1 auto;
+      min-width: 80px;
+      accent-color: var(--accent);
+      cursor: pointer;
+    }
+    .audio-speed-btn {
+      min-width: 48px;
+      height: 28px;
+      padding: 0 8px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      background: var(--surface-subtle);
+      color: var(--ink-secondary);
+      font-size: 12px;
+      font-weight: 600;
+      font-variant-numeric: tabular-nums;
+    }
+    .audio-speed-btn:hover { border-color: var(--border-strong); color: var(--ink); }
+    .audio-speed-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+    /* 5. 发言记录主面板 */
+    .transcript-panel {
+      padding: 0 28px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-md);
+      background: var(--surface);
+      box-shadow: var(--shadow-xs);
+    }
+    .transcript-heading {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+      min-height: 60px;
+      padding: 12px 0;
+      border-bottom: 1px solid var(--border);
+      flex-wrap: wrap;
+    }
+    .transcript-title-wrap {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .transcript-heading h2 {
+      margin: 0;
+      font-size: 15px;
+      font-weight: 650;
+      color: var(--ink);
+    }
+    .utterance-count {
+      color: var(--muted);
+      font-size: 12.5px;
+      font-variant-numeric: tabular-nums;
+    }
+    .heading-tools {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .search-box {
+      position: relative;
+      display: inline-flex;
+      align-items: center;
+    }
+    .search-box .search-icon {
+      position: absolute;
+      left: 10px;
+      color: var(--muted);
+      pointer-events: none;
+    }
+    .search-input {
+      width: 210px;
+      height: 32px;
+      padding: 0 28px 0 30px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      background: var(--bg);
+      color: var(--ink);
+      font-size: 13px;
+      transition: border-color 160ms ease, background 160ms ease, width 180ms ease;
+    }
+    .search-input:focus {
+      outline: none;
+      border-color: var(--accent);
+      background: #fff;
+      box-shadow: 0 0 0 3px var(--accent-ring);
+    }
+    .search-input::placeholder { color: var(--muted); }
+    .search-input::-webkit-search-cancel-button { -webkit-appearance: none; appearance: none; }
+    .search-clear {
+      position: absolute;
+      right: 6px;
+      width: 20px;
+      height: 20px;
+      padding: 0;
+      border: 0;
+      border-radius: 50%;
+      background: transparent;
+      color: var(--muted);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .search-clear[hidden] { display: none; }
+    .search-clear:hover { background: var(--surface-subtle); color: var(--ink); }
+
+    .transcript-list { min-height: 300px; }
+    .empty-state {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 300px;
+      padding: 32px 16px;
+      text-align: center;
+      color: var(--muted);
+    }
+    .empty-icon {
+      width: 44px;
+      height: 44px;
+      margin-bottom: 14px;
+      border-radius: 12px;
+      background: var(--surface-subtle);
+      color: var(--accent);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .empty-icon svg { width: 20px; height: 20px; }
+    .empty-state strong {
+      margin-bottom: 6px;
+      color: var(--ink);
+      font-size: 15px;
+      font-weight: 600;
+    }
+    .empty-state span {
+      max-width: 400px;
+      font-size: 13.5px;
+      line-height: 1.7;
+    }
+    .filter-empty {
+      padding: 40px 16px;
+      text-align: center;
+      color: var(--muted);
+      font-size: 13.5px;
+    }
+    .filter-empty[hidden] { display: none; }
+    .filter-empty button { margin-top: 12px; }
+
+    /* 单条发言行 */
     .utterance {
       display: grid;
-      grid-template-columns: 116px minmax(0, 1fr);
+      grid-template-columns: 126px minmax(0, 1fr);
       gap: 18px;
-      padding: 19px 0;
+      padding: 20px 10px;
+      margin: 0 -10px;
       border-bottom: 1px solid #edf0ed;
-      animation: arrive .14s ease-out both;
+      border-radius: var(--radius-sm);
+      transition: background 180ms ease;
     }
     .utterance:last-child { border-bottom: 0; }
+    .utterance[hidden] { display: none; }
+    .utterance.is-playing {
+      background: var(--accent-soft);
+    }
     body:not(.is-diarized) .utterance { grid-template-columns: minmax(0, 1fr); }
     body:not(.is-diarized) .utt-side { display: none; }
-    .utt-side { display: flex; flex-direction: column; align-items: flex-start; gap: 7px; padding-top: 3px; }
-    .speaker-slot { min-height: 20px; }
-    .speaker-placeholder { color: #89958e; font-size: 10px; }
-    .spk-badge { display: inline-block; padding: 3px 7px; border-radius: 4px; color: white; font-size: 10px; font-weight: 600; }
-    .utt-id { color: #a0aaa4; font-family: ui-monospace, "Cascadia Code", monospace; font-size: 9px; }
+
+    .utt-side {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 6px;
+      padding-top: 2px;
+    }
+    .speaker-slot { min-height: 24px; }
+    .speaker-placeholder { color: var(--muted); font-size: 12px; }
+    .spk-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      max-width: 122px;
+      padding: 4px 10px;
+      border-radius: var(--radius-pill);
+      color: #fff;
+      font-size: 12px;
+      font-weight: 600;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
     .utt-main { min-width: 0; }
-    .utterance-meta { align-items: baseline; margin-bottom: 7px; }
-    .utt-time { color: #89948e; font-family: ui-monospace, "Cascadia Code", monospace; font-size: 10px; font-variant-numeric: tabular-nums; }
-    .utt-state { color: #838f88; font-size: 10px; white-space: nowrap; }
-    .utt-state.is-pending { color: var(--pending); }
+    .utterance-meta {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 6px;
+    }
+    .utt-time-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      padding: 2px 7px 2px 5px;
+      margin-left: -5px;
+      border: 0;
+      border-radius: 4px;
+      background: transparent;
+      color: var(--muted);
+      font-size: 12px;
+      font-variant-numeric: tabular-nums;
+      transition: background 140ms ease, color 140ms ease;
+    }
+    .utt-time-btn.can-play:hover {
+      background: var(--accent-soft);
+      color: var(--accent);
+    }
+    .utt-time-btn:not(.can-play) { cursor: default; }
+    .utt-time-btn:not(.can-play) .play-mini { display: none; }
+    .utt-time-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+    .utt-state {
+      color: var(--muted);
+      font-size: 12px;
+      white-space: nowrap;
+    }
+    .utt-state.is-pending { color: var(--warn); }
     .utt-state.is-confirmed { color: var(--accent); }
+    .utt-state[hidden] { display: none; }
+
     .utt-text {
       margin: 0;
       overflow-wrap: anywhere;
       font-size: 15px;
-      line-height: 1.85;
-      white-space: normal;
+      line-height: 1.88;
+      color: var(--ink);
     }
-    /* 保持草稿与正体字重完全一致 (400)，消除斜体切正体时的字宽重排卡顿感 */
-    .draft-italic { color: #6e7b74; font-style: italic; font-weight: 400; opacity: 0.86; }
-    .confirmed-normal { color: #202a26; font-style: normal; font-weight: 400; opacity: 1; }
+    .draft-italic { color: var(--muted); font-style: italic; font-weight: 400; opacity: 0.88; }
+    .confirmed-normal { color: var(--ink); font-style: normal; font-weight: 400; opacity: 1; }
     .utt-text span {
-      transition: color 160ms cubic-bezier(0.22, 1, 0.36, 1), opacity 160ms cubic-bezier(0.22, 1, 0.36, 1);
+      transition: color 180ms ease, opacity 180ms ease;
     }
-    /* [C2] 用纯 CSS 间距代替篡改上一句 DOM 文本插逗号，确保直播视图与落盘数据完全一致 */
     .utt-text span + span { margin-left: 0.35em; }
-    /* 柔和呼吸光标 */
     .utt-text.is-typing::after {
       display: inline-block;
-      width: 1.5px;
-      height: 15px;
+      width: 2px;
+      height: 16px;
       margin-left: 4px;
       border-radius: 1px;
       background: var(--accent);
       content: "";
-      vertical-align: -2px;
-      animation: soft-blink 1.25s ease-in-out infinite;
+      vertical-align: -3px;
+      animation: soft-blink 1.2s ease-in-out infinite;
     }
-    .transcript-footer { min-height: 40px; padding: 12px 0; border-top: 1px solid #edf0ed; color: var(--muted); font-size: 10px; }
-    .backfill { padding: 15px 0 17px; border-top: 1px solid var(--line); }
-    .backfill[hidden] { display: none; }
-    .backfill-heading { gap: 10px; color: #536158; font-size: 11px; }
-    .progress-value { color: var(--accent); font-family: ui-monospace, "Cascadia Code", monospace; font-size: 10px; font-weight: 600; }
-    .progress-track { height: 3px; margin: 9px 0 7px; background: #e8ede9; }
-    .progress-fill { width: 0; height: 100%; background: var(--accent); transition: width .16s linear; }
-    .progress-status { margin: 0; color: var(--muted); font-size: 10px; }
-    .notice { display: none; margin: 11px 0; padding: 9px 10px; border-radius: 5px; background: #f8f2e9; color: var(--pending); font-size: 10px; line-height: 1.6; }
-    .notice.is-visible { display: block; }
-    .notice.is-error { background: #fbefee; color: var(--error); }
+    mark.search-hit {
+      padding: 0 2px;
+      border-radius: 3px;
+      background: var(--hit-bg);
+      color: var(--hit-ink);
+    }
 
-    @keyframes arrive { from { opacity: 0; } to { opacity: 1; } }
+    .transcript-footer {
+      min-height: 44px;
+      padding: 13px 0;
+      border-top: 1px solid #edf0ed;
+      color: var(--muted);
+      font-size: 12.5px;
+    }
+
     @keyframes soft-blink {
       0%, 100% { opacity: 0.95; }
-      50% { opacity: 0.12; }
+      50% { opacity: 0.15; }
     }
-    @media (max-width: 620px) {
-      .shell { width: min(100% - 28px, 1080px); padding-top: 20px; }
-      .page-header { align-items: flex-start; flex-direction: column; gap: 11px; padding-bottom: 17px; }
-      .action-row { gap: 7px; padding: 14px 0 11px; }
-      .button { flex: 1 1 0; padding: 0 8px; font-size: 11px; }
-      .audio-sim { grid-template-columns: 1fr; gap: 8px; padding: 10px; }
-      .audio-caption { display: inline; margin-left: 5px; }
-      .audio-row { gap: 7px; flex-wrap: wrap; }
-      .file-name { font-size: 9px; }
-      .transcript-panel { min-height: 360px; padding: 0 14px; }
-      .transcript-list { min-height: 270px; }
-      .empty-state { min-height: 250px; }
-      .utterance { grid-template-columns: 78px minmax(0, 1fr); gap: 10px; padding: 16px 0; }
-      .utt-text { font-size: 14px; }
+    @keyframes live-pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.45; transform: scale(0.82); }
+    }
+
+    @media (max-width: 720px) {
+      .shell { width: min(100% - 24px, 960px); padding: 16px 0 48px; }
+      .topbar { flex-direction: column; align-items: stretch; gap: 12px; }
+      .topbar-tools { justify-content: space-between; }
+      .history-wrap { flex: 1 1 auto; }
+      .select-box { max-width: none; flex: 1 1 auto; }
+      .workspace-bar { flex-direction: column; align-items: stretch; gap: 12px; padding: 14px; }
+      .bar-divider { width: 100%; height: 1px; }
+      .record-group, .import-group { width: 100%; flex-wrap: wrap; }
+      .summary-card { padding: 18px 16px; }
+      .summary-head { flex-direction: column; align-items: stretch; }
+      .transcript-panel { padding: 0 16px; }
+      .search-input { width: 100%; }
+      .search-box { flex: 1 1 160px; }
+      .utterance { grid-template-columns: 1fr; gap: 6px; padding: 16px 8px; }
+      .audio-bar { flex-wrap: wrap; padding: 10px 12px; }
     }
     @media (prefers-reduced-motion: reduce) {
-      *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
+      *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
     }
   </style>
 </head>
 <body>
   <main class="shell">
-    <header class="page-header">
-      <div>
-        <h1>实时会议记录</h1>
-        <p class="subtitle">语音实时成稿，句尾自动校正，会后补全说话人。</p>
+    <!-- 顶部极简栏 -->
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">
+          <svg class="icon" viewBox="0 0 24 24">
+            <path d="M12 3v18"></path>
+            <path d="M8 7v10"></path>
+            <path d="M16 7v10"></path>
+            <path d="M4 10v4"></path>
+            <path d="M20 10v4"></path>
+          </svg>
+        </span>
+        <div class="brand-title-row">
+          <h1>会议纪要</h1>
+          <span class="state-tag" id="session-state"><i class="state-dot"></i><span id="state-text">准备就绪</span></span>
+        </div>
       </div>
-      <span class="state-tag" id="session-state"><i class="state-dot"></i><span id="state-text">准备就绪</span></span>
+
+      <div class="topbar-tools">
+        <div class="history-wrap">
+          <select class="select-box" id="history-session-select" aria-label="查看历史会议">
+            <option value="">历史会议 (0)</option>
+          </select>
+          <button class="btn btn-icon btn-danger-ghost" id="delete-session" type="button" disabled aria-label="删除选中的历史会议" title="删除当前选中的历史会议">
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M3 6h18"></path>
+              <path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2"></path>
+              <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"></path>
+            </svg>
+          </button>
+        </div>
+
+        <details class="more-menu" id="more-menu">
+          <summary aria-label="更多选项与文本对照" title="更多选项">
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+              <circle cx="12" cy="5" r="1.4" fill="currentColor" stroke="none"></circle>
+              <circle cx="12" cy="12" r="1.4" fill="currentColor" stroke="none"></circle>
+              <circle cx="12" cy="19" r="1.4" fill="currentColor" stroke="none"></circle>
+            </svg>
+          </summary>
+          <div class="more-popover">
+            <div>
+              <div class="more-section-label">文本对照视图</div>
+              <div class="view-switcher" role="group" aria-label="文本版本切换">
+                <button class="view-btn is-active" type="button" data-view-mode="final">最终定稿</button>
+                <button class="view-btn" type="button" data-view-mode="stream">流式润色</button>
+                <button class="view-btn" type="button" data-view-mode="raw">原始识别</button>
+              </div>
+            </div>
+            <div class="more-divider"></div>
+            <button class="btn more-item-btn" id="simulate-audio" type="button" disabled title="按 1x 真实语速模拟直播字幕效果">
+              <svg class="icon icon-sm" viewBox="0 0 24 24" aria-hidden="true"><polygon points="6 4 20 12 6 20 6 4"></polygon></svg>
+              按 1× 实时语速演示
+            </button>
+            <button class="btn more-item-btn" id="reset-session" type="button">
+              <svg class="icon icon-sm" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M3 12a9 9 0 1 0 3-6.7L3 8"></path>
+                <path d="M3 3v5h5"></path>
+              </svg>
+              清空当前页面
+            </button>
+          </div>
+        </details>
+      </div>
     </header>
 
-    <nav class="action-row" aria-label="会议控制">
-      <button class="button button-primary" id="start-meeting" type="button">开始会议</button>
-      <button class="button" id="reset-session" type="button">重置</button>
-      <button class="button button-danger" id="end-meeting" type="button">结束会议</button>
-      <div class="action-spacer">
-        <select class="select-box" id="history-session-select" aria-label="选择历史会话">
-          <option value="">历史会话 (0)</option>
-        </select>
-        <button class="button tool-btn" id="copy-transcript" type="button" title="复制当前显示的全文">复制全文</button>
-        <button class="button tool-btn" id="export-markdown" type="button" title="导出 Markdown 会议纪要">导出纪要</button>
+    <!-- 主操作条：录音 + 拖入/导入音频 -->
+    <section class="workspace-bar" id="workspace-bar" aria-label="开始记录会议">
+      <div class="record-group">
+        <button class="btn btn-primary" id="start-meeting" type="button">
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+            <rect x="9" y="2" width="6" height="12" rx="3"></rect>
+            <path d="M5 10a7 7 0 0 0 14 0"></path>
+            <path d="M12 17v4"></path>
+            <path d="M8 21h8"></path>
+          </svg>
+          开始录音
+        </button>
+        <button class="btn btn-stop" id="end-meeting" type="button" hidden>
+          <svg class="icon icon-fill" viewBox="0 0 24 24" aria-hidden="true">
+            <rect x="6" y="6" width="12" height="12" rx="2"></rect>
+          </svg>
+          结束并整理
+        </button>
       </div>
-    </nav>
 
-    <section class="audio-sim" aria-label="音频模拟">
-      <div class="audio-title">音频模拟<span class="audio-caption">用本地音频代替麦克风输入</span></div>
-      <div class="audio-row">
-        <label class="file-button">
-          选择音频
+      <span class="bar-divider" aria-hidden="true"></span>
+
+      <div class="import-group">
+        <label class="file-label">
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+            <polyline points="17 8 12 3 7 8"></polyline>
+            <line x1="12" y1="3" x2="12" y2="15"></line>
+          </svg>
+          导入录音
           <input id="audio-file" type="file" accept="audio/*">
         </label>
-        <span class="file-name" id="audio-name">尚未选择文件</span>
-        <div class="sim-actions">
-          <button class="button simulate-button" id="simulate-audio" type="button" disabled title="按 1x 真实语速模拟流式会议">开始模拟</button>
-          <button class="button button-primary simulate-button" id="simulate-audio-fast" type="button" disabled title="跳过 1x 实时等待，全速流式转写并快速进入说话人分离">⚡ 快速模拟</button>
-        </div>
+        <span class="file-name" id="audio-name">支持拖拽录音文件到此处，自动整理发言与纪要</span>
+        <button class="btn btn-primary" id="simulate-audio-fast" type="button" disabled hidden>
+          开始整理
+        </button>
       </div>
     </section>
 
-    <section class="transcript-panel" aria-labelledby="transcript-title">
-      <header class="transcript-heading">
-        <h2 id="transcript-title">转写内容</h2>
-        <div class="heading-tools">
-          <div class="view-switcher" role="group" aria-label="文本版本切换">
-            <button class="view-btn is-active" type="button" data-view-mode="final" title="显示二遍定稿/终稿精修文本">最终定稿</button>
-            <button class="view-btn" type="button" data-view-mode="stream" title="显示直播阶段流式润色文本">直播润色稿</button>
-            <button class="view-btn" type="button" data-view-mode="raw" title="显示未经润色的原始识别稿">原始识别稿</button>
+    <!-- 会后处理进度 -->
+    <section class="progress-banner" id="backfill" hidden aria-label="会后整理进度">
+      <div class="progress-top">
+        <span id="progress-copy">正在整理会议记录...</span>
+        <span class="progress-value" id="progress-value">处理中</span>
+      </div>
+      <div class="progress-track" id="progress-track" role="progressbar" aria-label="会后整理进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+        <div class="progress-fill" id="progress-fill"></div>
+      </div>
+      <p class="progress-status" id="progress-status">请稍候，完成后会自动呈现发言人与会议纪要。</p>
+    </section>
+
+    <!-- 轻量通知 -->
+    <div class="notice" id="notice" role="status"></div>
+
+    <!-- 会后小秘书纪要卡片 -->
+    <section class="summary-card" id="summary-card" hidden aria-label="会议纪要">
+      <div class="summary-head">
+        <div>
+          <div class="summary-kicker">
+            <svg class="icon icon-sm" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M12 3l1.9 5.3L19 10l-5.1 1.7L12 17l-1.9-5.3L5 10l5.1-1.7z"></path>
+            </svg>
+            会后小秘书
           </div>
-          <span class="utterance-count"><span id="utterance-count">0</span> 段</span>
+          <h2 class="summary-title" id="summary-title">会议纪要</h2>
         </div>
-      </header>
-      <!-- [C6] 将 aria-live 设为 off，避免流式逐字更新时反复打断读屏软件 -->
-      <div class="transcript-list" id="transcript-list" aria-live="off">
-        <div class="empty-state" id="empty-state">
-          <strong>等待语音输入</strong>
-          <span>点击“开始会议”接入麦克风录音，或选择音频文件点击“开始模拟 / ⚡ 快速模拟”。</span>
+        <div class="summary-actions">
+          <button class="btn btn-sm" id="copy-summary" type="button" hidden title="仅复制精炼纪要（不含长篇发言原文），方便发群或邮件">
+            <svg class="icon icon-sm" viewBox="0 0 24 24" aria-hidden="true">
+              <rect x="9" y="9" width="13" height="13" rx="2"></rect>
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+            </svg>
+            复制纪要
+          </button>
+          <button class="btn btn-sm btn-primary" id="generate-summary" type="button">生成纪要</button>
         </div>
       </div>
-      <footer class="transcript-footer" id="transcript-hint">会议尚未开始</footer>
-      <section class="backfill" id="backfill" hidden aria-label="说话人回填进度">
-        <div class="backfill-heading">
-          <span id="progress-copy">说话人回填</span>
-          <span class="progress-value" id="progress-value">等待中</span>
+      <div id="summary-body"></div>
+      <div class="speakers-bar" id="speakers-bar" hidden></div>
+    </section>
+
+    <!-- 极简音频回放条（有录音时自动出现，点任意发言即可跳转听原声） -->
+    <section class="audio-bar" id="audio-bar" hidden aria-label="会议原声回放">
+      <audio id="session-audio" preload="metadata"></audio>
+      <button class="audio-play-btn" id="audio-play-btn" type="button" aria-label="播放或暂停会议原声">
+        <svg class="icon icon-fill" id="audio-play-icon" viewBox="0 0 24 24" aria-hidden="true">
+          <polygon points="7 4 20 12 7 20 7 4"></polygon>
+        </svg>
+      </button>
+      <span class="audio-time"><span id="audio-cur">00:00</span> / <span id="audio-dur">00:00</span></span>
+      <input class="audio-seek" id="audio-seek" type="range" min="0" max="100" step="0.1" value="0" aria-label="播放进度">
+      <button class="audio-speed-btn" id="audio-speed-btn" type="button" title="切换播放倍速">1×</button>
+    </section>
+
+    <!-- 发言记录面板 -->
+    <section class="transcript-panel" aria-labelledby="transcript-title">
+      <header class="transcript-heading">
+        <div class="transcript-title-wrap">
+          <h2 id="transcript-title">发言记录</h2>
+          <span class="utterance-count"><span id="utterance-count">0</span> 段</span>
         </div>
-        <div class="progress-track" id="progress-track" role="progressbar" aria-label="说话人回填进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
-          <div class="progress-fill" id="progress-fill"></div>
+        <div class="heading-tools">
+          <div class="search-box">
+            <svg class="icon icon-sm search-icon" viewBox="0 0 24 24" aria-hidden="true">
+              <circle cx="11" cy="11" r="7"></circle>
+              <line x1="20" y1="20" x2="16.65" y2="16.65"></line>
+            </svg>
+            <input class="search-input" id="transcript-search" type="text" role="searchbox" placeholder="搜索关键词..." aria-label="搜索发言内容">
+            <button class="search-clear" id="search-clear" type="button" hidden aria-label="清除搜索">
+              <svg class="icon icon-sm" viewBox="0 0 24 24" aria-hidden="true">
+                <line x1="18" y1="6" x2="6" y2="18"></line>
+                <line x1="6" y1="6" x2="18" y2="18"></line>
+              </svg>
+            </button>
+          </div>
+          <button class="btn btn-sm" id="copy-transcript" type="button" title="复制纪要与完整发言记录">
+            <svg class="icon icon-sm" viewBox="0 0 24 24" aria-hidden="true">
+              <rect x="9" y="9" width="13" height="13" rx="2"></rect>
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+            </svg>
+            复制全文
+          </button>
+          <button class="btn btn-sm" id="export-markdown" type="button" title="下载 Markdown 格式的会议纪要与完整记录">
+            <svg class="icon icon-sm" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+              <polyline points="7 10 12 15 17 10"></polyline>
+              <line x1="12" y1="15" x2="12" y2="3"></line>
+            </svg>
+            导出文档
+          </button>
         </div>
-        <p class="progress-status" id="progress-status">按整段录音识别说话人。</p>
-      </section>
-      <div class="notice" id="notice" role="status"></div>
+      </header>
+
+      <div class="transcript-list" id="transcript-list" aria-live="off">
+        <div class="empty-state" id="empty-state">
+          <div class="empty-icon" aria-hidden="true">
+            <svg class="icon" viewBox="0 0 24 24">
+              <rect x="9" y="2" width="6" height="12" rx="3"></rect>
+              <path d="M5 10a7 7 0 0 0 14 0"></path>
+              <path d="M12 17v4"></path>
+              <path d="M8 21h8"></path>
+            </svg>
+          </div>
+          <strong>准备好记录你的下一场会议</strong>
+          <span>点击左上角“开始录音”，或直接拖入本地录音文件，会后自动区分发言人并提炼会议纪要。</span>
+        </div>
+      </div>
+
+      <div class="filter-empty" id="filter-empty" hidden>
+        <div>没有找到符合条件的发言</div>
+        <button class="btn btn-sm" id="clear-filters" type="button">查看全部发言</button>
+      </div>
+
+      <footer class="transcript-footer" id="transcript-hint">准备就绪</footer>
     </section>
   </main>
 
@@ -316,11 +1263,25 @@
       var rows = new Map();
       var currentUttId = null;
       var currentViewMode = "final"; // "final" | "stream" | "raw"
-      // [C4] 扩展到 10 种高区分度低饱和度配色，支持 6~10 人会议不撞色
+      var currentSessionId = null;
+      var currentSummary = null;
+      var currentSpeakerNames = {};
+      var currentSpeakers = {}; // { spk_label: spk_index }
+      var activeSpeakerFilter = null; // null | spk_label
+      var searchQuery = "";
+      var hasSessionAudio = false;
+      var noticeTimer = null;
+      var speedSteps = [1, 1.25, 1.5, 2];
+      var speedIndex = 0;
+
+      // 10 种沉稳低饱和编辑风配色（无刺眼荧光与紫罗兰）
       var speakerColors = [
-        "#466b5a", "#4f6d7a", "#7a5c61", "#77715d", "#5b5f80",
-        "#8a6b47", "#3d7068", "#75597a", "#5c7448", "#677681"
+        "#2f5d4a", "#355c7d", "#8c534e", "#7c6a46", "#4a6670",
+        "#6b6d4b", "#2e6f6b", "#7d5a50", "#4f6d4a", "#5a6672"
       ];
+
+      var PLAY_SVG = '<polygon points="7 4 20 12 7 20 7 4"></polygon>';
+      var PAUSE_SVG = '<rect x="6" y="4" width="4" height="16" rx="1"></rect><rect x="14" y="4" width="4" height="16" rx="1"></rect>';
 
       function pad(value) { return String(value).padStart(2, "0"); }
       function formatTime(ms, showTenths) {
@@ -333,26 +1294,56 @@
         }
         return base;
       }
-      // [C7] 当起止在同一秒或时长不足 1 秒时自动显示 0.1 秒精度 (如 00:00.1 至 00:00.7)
+      function formatSec(sec) {
+        var s = Math.max(0, Math.floor(Number(sec) || 0));
+        return pad(Math.floor(s / 60)) + ":" + pad(s % 60);
+      }
       function formatRange(start, end) {
-        if (typeof start !== "number") return "未开始";
-        if (typeof end !== "number") return formatTime(start, false) + " 至 实时";
+        if (typeof start !== "number") return "00:00";
+        if (typeof end !== "number") return formatTime(start, false) + " · 实时";
         var needTenths = (Math.abs(end - start) < 1000) || (Math.floor(start / 1000) === Math.floor(end / 1000));
-        return formatTime(start, needTenths) + " 至 " + formatTime(end, needTenths);
+        return formatTime(start, needTenths) + " – " + formatTime(end, needTenths);
+      }
+      function defaultSpeakerName(label, spkIndex) {
+        if (typeof spkIndex === "number" && !isNaN(spkIndex) && spkIndex >= 0) {
+          return "发言人 " + (spkIndex + 1);
+        }
+        if (typeof label === "string" && label.indexOf("speaker_") === 0) {
+          var num = Number(label.slice(8));
+          if (!isNaN(num) && num >= 0) return "发言人 " + (num + 1);
+        }
+        return label || "发言人";
+      }
+      function resolveSpeakerName(label, spkIndex) {
+        if (label && currentSpeakerNames[label]) return currentSpeakerNames[label];
+        return defaultSpeakerName(label, spkIndex);
       }
       function setStatus(text, kind) {
         var badge = document.getElementById("session-state");
-        badge.classList.remove("is-live", "is-done", "is-error");
+        badge.classList.remove("is-live", "is-busy", "is-done", "is-error");
         if (kind) badge.classList.add("is-" + kind);
         document.getElementById("state-text").textContent = text;
       }
-      function showNotice(message, isError) {
+      function showNotice(message, kind) {
         var notice = document.getElementById("notice");
+        if (noticeTimer) {
+          clearTimeout(noticeTimer);
+          noticeTimer = null;
+        }
         notice.textContent = message;
-        notice.classList.add("is-visible");
-        notice.classList.toggle("is-error", !!isError);
+        notice.className = "notice is-visible";
+        if (kind === true || kind === "error") {
+          notice.classList.add("is-error");
+        } else if (kind === "success") {
+          notice.classList.add("is-success");
+          noticeTimer = setTimeout(clearNotice, 3600);
+        }
       }
       function clearNotice() {
+        if (noticeTimer) {
+          clearTimeout(noticeTimer);
+          noticeTimer = null;
+        }
         var notice = document.getElementById("notice");
         notice.textContent = "";
         notice.className = "notice";
@@ -379,31 +1370,197 @@
           if (row.rawMap[k]) parts.push(row.rawMap[k]);
         });
         if (parts.length) {
-          var tip = "原始流式识别：" + parts.join(" | ");
-          row.article.title = tip;
-          row.text.title = tip;
+          row.text.title = "原始语音识别：" + parts.join(" ");
         }
       }
-      // [C1] 徽章真实反映当前段落文字来源与精修状态
-      function resolveBadgeText(event) {
-        var src = event.text_source;
-        var status = event.polish_status;
-        if (src === "turn_polished") return "终稿已精修";
-        if (src === "final_asr") {
-          if (status === "rejected") return "二遍定稿 (精修已拦截)";
-          return "二遍定稿";
-        }
-        if (src === "stream_polished") return "流式已校正";
-        if (src === "raw") return "原文保留";
-        return event.corrected ? "流式已校正" : "原文保留";
-      }
-      // [C3] 根据 stage 显示准确的阶段说明
       function resolveStageHint(stage, msg) {
-        if (stage === "diarization") return "正在进行全局声纹聚类与说话人回填...";
-        if (stage === "final_asr") return "正在进行离线二遍高精度转写...";
-        if (stage === "final_polish") return "正在按说话人段落进行终稿校对...";
-        return msg || "正在进行会后处理...";
+        if (stage === "diarization") return "正在识别参会发言人...";
+        if (stage === "final_asr") return "正在整理高精度最终稿...";
+        if (stage === "final_polish") return "正在润色发言记录...";
+        if (stage === "summary") return "会后小秘书正在提炼主题、结论与待办...";
+        return msg || "正在进行会后整理...";
       }
+
+      /* 音频回放控制 */
+      var audioEl = document.getElementById("session-audio");
+      var audioBar = document.getElementById("audio-bar");
+      var audioPlayBtn = document.getElementById("audio-play-btn");
+      var audioPlayIcon = document.getElementById("audio-play-icon");
+      var audioSeek = document.getElementById("audio-seek");
+      var audioCur = document.getElementById("audio-cur");
+      var audioDur = document.getElementById("audio-dur");
+      var audioSpeedBtn = document.getElementById("audio-speed-btn");
+
+      function updatePlayableRows() {
+        rows.forEach(function (row) {
+          if (!row.timeBtn) return;
+          var playable = hasSessionAudio && typeof row.startMs === "number";
+          row.timeBtn.classList.toggle("can-play", playable);
+          row.timeBtn.disabled = !playable;
+          row.timeBtn.title = playable ? "点击从此处播放原声" : "";
+        });
+      }
+      function setAudioSource(sessionId, enabled) {
+        hasSessionAudio = !!(sessionId && enabled);
+        audioEl.pause();
+        audioPlayIcon.innerHTML = PLAY_SVG;
+        clearPlayingHighlight();
+        if (!hasSessionAudio) {
+          audioBar.hidden = true;
+          audioEl.removeAttribute("src");
+          audioEl.load();
+          audioCur.textContent = "00:00";
+          audioDur.textContent = "00:00";
+          audioSeek.value = "0";
+          updatePlayableRows();
+          return;
+        }
+        audioEl.src = "/api/sessions/" + encodeURIComponent(sessionId) + "/audio";
+        audioEl.playbackRate = speedSteps[speedIndex];
+        audioBar.hidden = false;
+        updatePlayableRows();
+      }
+      function clearPlayingHighlight() {
+        rows.forEach(function (row) {
+          row.article.classList.remove("is-playing");
+        });
+      }
+      function syncPlayingHighlight() {
+        if (!hasSessionAudio || audioEl.paused) return;
+        var curMs = audioEl.currentTime * 1000;
+        var matched = null;
+        rows.forEach(function (row) {
+          if (typeof row.startMs === "number" && typeof row.endMs === "number") {
+            if (curMs >= row.startMs && curMs <= row.endMs + 150) {
+              matched = row;
+            }
+          }
+        });
+        rows.forEach(function (row) {
+          row.article.classList.toggle("is-playing", row === matched);
+        });
+      }
+      function playFromMs(startMs) {
+        if (!hasSessionAudio || typeof startMs !== "number") return;
+        var targetSec = Math.max(0, startMs / 1000);
+        try {
+          audioEl.currentTime = targetSec;
+        } catch (err) {}
+        audioEl.playbackRate = speedSteps[speedIndex];
+        var p = audioEl.play();
+        if (p && typeof p.catch === "function") {
+          p.catch(function () {});
+        }
+      }
+      audioPlayBtn.addEventListener("click", function () {
+        if (!hasSessionAudio) return;
+        if (audioEl.paused) {
+          audioEl.playbackRate = speedSteps[speedIndex];
+          var p = audioEl.play();
+          if (p && typeof p.catch === "function") p.catch(function () {});
+        } else {
+          audioEl.pause();
+        }
+      });
+      audioEl.addEventListener("loadedmetadata", function () {
+        var dur = isFinite(audioEl.duration) ? audioEl.duration : 0;
+        audioSeek.max = String(dur || 100);
+        audioDur.textContent = formatSec(dur);
+      });
+      audioEl.addEventListener("timeupdate", function () {
+        var cur = audioEl.currentTime || 0;
+        audioCur.textContent = formatSec(cur);
+        if (isFinite(audioEl.duration) && audioEl.duration > 0) {
+          audioSeek.max = String(audioEl.duration);
+          audioSeek.value = String(cur);
+        }
+        syncPlayingHighlight();
+      });
+      audioEl.addEventListener("play", function () {
+        audioPlayIcon.innerHTML = PAUSE_SVG;
+        syncPlayingHighlight();
+      });
+      audioEl.addEventListener("pause", function () {
+        audioPlayIcon.innerHTML = PLAY_SVG;
+      });
+      audioEl.addEventListener("ended", function () {
+        audioPlayIcon.innerHTML = PLAY_SVG;
+        clearPlayingHighlight();
+      });
+      audioSeek.addEventListener("input", function () {
+        if (!hasSessionAudio) return;
+        var val = Number(audioSeek.value) || 0;
+        audioEl.currentTime = val;
+        audioCur.textContent = formatSec(val);
+      });
+      audioSpeedBtn.addEventListener("click", function () {
+        speedIndex = (speedIndex + 1) % speedSteps.length;
+        var rate = speedSteps[speedIndex];
+        audioEl.playbackRate = rate;
+        audioSpeedBtn.textContent = rate + "×";
+      });
+
+      /* 渲染与搜索/按人筛选 */
+      function renderHighlightedText(container, text, query) {
+        container.replaceChildren();
+        if (!query) {
+          container.textContent = text;
+          return;
+        }
+        var lower = text.toLowerCase();
+        var qLower = query.toLowerCase();
+        var pos = 0;
+        var idx = lower.indexOf(qLower, pos);
+        while (idx !== -1) {
+          if (idx > pos) {
+            container.appendChild(document.createTextNode(text.slice(pos, idx)));
+          }
+          var mark = document.createElement("mark");
+          mark.className = "search-hit";
+          mark.textContent = text.slice(idx, idx + query.length);
+          container.appendChild(mark);
+          pos = idx + query.length;
+          idx = lower.indexOf(qLower, pos);
+        }
+        if (pos < text.length) {
+          container.appendChild(document.createTextNode(text.slice(pos)));
+        }
+      }
+
+      function pickVersionText(verObj) {
+        if (!verObj) return "";
+        if (currentViewMode === "raw") return verObj.raw || verObj.stream || verObj.final || "";
+        if (currentViewMode === "stream") return verObj.stream || verObj.final || verObj.raw || "";
+        return verObj.final || verObj.stream || verObj.raw || "";
+      }
+
+      function applyFilters() {
+        var q = searchQuery.trim();
+        var visibleCount = 0;
+        rows.forEach(function (row) {
+          var speakerOk = !activeSpeakerFilter || row.speakerLabel === activeSpeakerFilter;
+          var fullText = "";
+          Object.keys(row.spans).forEach(function (key) {
+            var txt = pickVersionText(row.versions[key]);
+            fullText += txt;
+            renderHighlightedText(row.spans[key], txt, q);
+          });
+          var queryOk = !q || fullText.toLowerCase().indexOf(q.toLowerCase()) !== -1;
+          var show = speakerOk && queryOk;
+          row.article.hidden = !show;
+          if (show) visibleCount += 1;
+        });
+
+        var countEl = document.getElementById("utterance-count");
+        if (activeSpeakerFilter || q) {
+          countEl.textContent = visibleCount + " / " + rows.size;
+        } else {
+          countEl.textContent = String(rows.size);
+        }
+        var filterEmpty = document.getElementById("filter-empty");
+        filterEmpty.hidden = !(rows.size > 0 && visibleCount === 0);
+      }
+
       function makeRow(event) {
         clearEmptyState();
         var article = document.createElement("article");
@@ -416,22 +1573,32 @@
         speakerSlot.className = "speaker-slot";
         var placeholder = document.createElement("span");
         placeholder.className = "speaker-placeholder";
-        placeholder.textContent = "待识别";
+        placeholder.textContent = "识别中";
         speakerSlot.appendChild(placeholder);
-        var id = document.createElement("span");
-        id.className = "utt-id";
-        id.textContent = event.utt_id;
-        side.append(speakerSlot, id);
+        side.appendChild(speakerSlot);
 
         var main = document.createElement("div");
         main.className = "utt-main";
         var meta = document.createElement("div");
         meta.className = "utterance-meta";
-        var time = document.createElement("time");
-        time.className = "utt-time";
+
+        var timeBtn = document.createElement("button");
+        timeBtn.type = "button";
+        timeBtn.className = "utt-time-btn";
+        timeBtn.disabled = true;
+        var playMini = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+        playMini.setAttribute("class", "icon icon-sm icon-fill play-mini");
+        playMini.setAttribute("viewBox", "0 0 24 24");
+        playMini.setAttribute("aria-hidden", "true");
+        playMini.innerHTML = PLAY_SVG;
+        var timeText = document.createElement("time");
+        timeBtn.append(playMini, timeText);
+
         var state = document.createElement("span");
         state.className = "utt-state";
-        meta.append(time, state);
+        state.hidden = true;
+        meta.append(timeBtn, state);
+
         var text = document.createElement("p");
         text.className = "utt-text";
         main.append(meta, text);
@@ -441,15 +1608,22 @@
         var row = {
           article: article,
           speakerSlot: speakerSlot,
-          time: time,
+          timeBtn: timeBtn,
+          time: timeText,
           state: state,
           text: text,
+          startMs: typeof event.start_ms === "number" ? event.start_ms : null,
+          endMs: typeof event.end_ms === "number" ? event.end_ms : null,
           spans: {},
           rawMap: {},
           versions: {},
           typingTimer: null
         };
-        // [C7] 创建行时即刻绑定原始文本悬停提示
+        timeBtn.addEventListener("click", function () {
+          if (hasSessionAudio && typeof row.startMs === "number") {
+            playFromMs(row.startMs);
+          }
+        });
         if (event.raw_text) {
           updateRawTooltip(row, event.source_utt_id || event.utt_id, event.raw_text);
         }
@@ -457,6 +1631,7 @@
         document.getElementById("utterance-count").textContent = String(rows.size);
         return row;
       }
+
       function getRow(event) { return rows.get(event.utt_id) || makeRow(event); }
       function sentenceSpan(row, key) {
         var span = row.spans[key];
@@ -468,17 +1643,6 @@
         }
         return span;
       }
-      function pickVersionText(verObj) {
-        if (!verObj) return "";
-        if (currentViewMode === "raw") {
-          return verObj.raw || verObj.stream || verObj.final || "";
-        }
-        if (currentViewMode === "stream") {
-          return verObj.stream || verObj.final || verObj.raw || "";
-        }
-        return verObj.final || verObj.stream || verObj.raw || "";
-      }
-      // [C2] 严禁修改 previousElementSibling.textContent 插逗号，确保 DOM 与落盘文本严格一致
       function setSentence(row, key, text, style, versions) {
         var span = sentenceSpan(row, key);
         if (span.className !== style) span.className = style;
@@ -490,18 +1654,7 @@
           row.versions[key].final = cleanSpaces(text || "");
         }
         var value = versions ? pickVersionText(versions) : cleanSpaces(text || "");
-        if (span.textContent !== value) span.textContent = value;
-      }
-      function refreshAllRowViews() {
-        rows.forEach(function (row) {
-          Object.keys(row.spans).forEach(function (key) {
-            var span = row.spans[key];
-            var ver = row.versions[key];
-            if (span && ver) {
-              span.textContent = pickVersionText(ver);
-            }
-          });
-        });
+        renderHighlightedText(span, value, searchQuery.trim());
       }
       function markTyping(row, active) {
         if (row.typingTimer) {
@@ -509,15 +1662,273 @@
           row.typingTimer = null;
         }
         if (active) {
-          if (!row.text.classList.contains("is-typing")) {
-            row.text.classList.add("is-typing");
-          }
+          row.text.classList.add("is-typing");
         } else {
           row.typingTimer = setTimeout(function () {
             row.text.classList.remove("is-typing");
             row.typingTimer = null;
           }, 420);
         }
+      }
+
+      function refreshSpeakerBadges() {
+        rows.forEach(function (row) {
+          if (!row.speakerLabel && typeof row.speaker !== "number") return;
+          var badge = row.speakerSlot.querySelector(".spk-badge");
+          if (badge) {
+            badge.textContent = resolveSpeakerName(row.speakerLabel, row.speaker);
+          }
+        });
+      }
+
+      /* 参会发言人条：点名片筛选“只看TA”，点铅笔改真名 */
+      function renderSpeakersBar() {
+        var bar = document.getElementById("speakers-bar");
+        var labels = Object.keys(currentSpeakers).sort(function (a, b) {
+          return currentSpeakers[a] - currentSpeakers[b];
+        });
+        if (!labels.length) {
+          bar.hidden = true;
+          bar.replaceChildren();
+          return;
+        }
+        bar.hidden = false;
+        bar.replaceChildren();
+
+        var heading = document.createElement("span");
+        heading.className = "speakers-bar-label";
+        heading.textContent = "发言人";
+        bar.appendChild(heading);
+
+        var allBtn = document.createElement("button");
+        allBtn.type = "button";
+        allBtn.className = "speaker-all-btn";
+        allBtn.textContent = "全部";
+        allBtn.setAttribute("aria-pressed", String(!activeSpeakerFilter));
+        allBtn.addEventListener("click", function () {
+          activeSpeakerFilter = null;
+          renderSpeakersBar();
+          applyFilters();
+        });
+        bar.appendChild(allBtn);
+
+        var roles = (currentSummary && currentSummary.speaker_roles) ? currentSummary.speaker_roles : {};
+        labels.forEach(function (label) {
+          var idx = currentSpeakers[label];
+          var isSelected = activeSpeakerFilter === label;
+          var displayName = resolveSpeakerName(label, idx);
+
+          var chip = document.createElement("div");
+          chip.className = "speaker-chip" + (isSelected ? " is-active" : "");
+
+          var dot = document.createElement("span");
+          dot.className = "speaker-dot";
+          dot.style.backgroundColor = speakerColors[Math.abs(Number(idx)) % speakerColors.length];
+
+          var filterBtn = document.createElement("button");
+          filterBtn.type = "button";
+          filterBtn.className = "speaker-filter-btn";
+          filterBtn.setAttribute("aria-pressed", String(isSelected));
+          filterBtn.title = (roles[label] ? (roles[label] + " · ") : "") + "点击只看该发言人";
+          var nameSpan = document.createElement("span");
+          nameSpan.textContent = displayName;
+          filterBtn.append(dot, nameSpan);
+          if (roles[label]) {
+            var roleSpan = document.createElement("span");
+            roleSpan.className = "speaker-role";
+            roleSpan.textContent = roles[label];
+            filterBtn.appendChild(roleSpan);
+          }
+          filterBtn.addEventListener("click", function () {
+            activeSpeakerFilter = (activeSpeakerFilter === label) ? null : label;
+            renderSpeakersBar();
+            applyFilters();
+          });
+
+          var renameBtn = document.createElement("button");
+          renameBtn.type = "button";
+          renameBtn.className = "speaker-rename-btn";
+          renameBtn.setAttribute("aria-label", "修改 " + displayName + " 的名字");
+          renameBtn.title = "修改名字";
+          renameBtn.innerHTML = '<svg class="icon icon-sm" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20h9"></path><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"></path></svg>';
+          renameBtn.addEventListener("click", function (ev) {
+            ev.stopPropagation();
+            var editWrap = document.createElement("div");
+            editWrap.className = "speaker-edit-wrap";
+            var dotClone = dot.cloneNode(true);
+            var input = document.createElement("input");
+            input.type = "text";
+            input.className = "speaker-edit-input";
+            input.value = currentSpeakerNames[label] || "";
+            input.placeholder = defaultSpeakerName(label, idx);
+            input.maxLength = 24;
+            editWrap.append(dotClone, input);
+            chip.replaceChildren(editWrap);
+            input.focus();
+            input.select();
+
+            var done = false;
+            function commit(save) {
+              if (done) return;
+              done = true;
+              if (save) {
+                var nextVal = input.value.trim();
+                if (nextVal) {
+                  currentSpeakerNames[label] = nextVal;
+                } else {
+                  delete currentSpeakerNames[label];
+                }
+                refreshSpeakerBadges();
+                if (currentSummary) renderSummaryCard();
+                if (typeof window.MeetingUI.onRenameSpeaker === "function" && currentSessionId) {
+                  window.MeetingUI.onRenameSpeaker(currentSessionId, label, nextVal);
+                }
+              }
+              renderSpeakersBar();
+            }
+            input.addEventListener("keydown", function (e) {
+              if (e.key === "Enter") { e.preventDefault(); commit(true); }
+              else if (e.key === "Escape") { e.preventDefault(); commit(false); }
+            });
+            input.addEventListener("blur", function () { commit(true); });
+          });
+
+          chip.append(filterBtn, renameBtn);
+          bar.appendChild(chip);
+        });
+      }
+
+      /* 渲染会后小秘书卡片 */
+      function renderSummaryCard() {
+        var card = document.getElementById("summary-card");
+        var titleEl = document.getElementById("summary-title");
+        var bodyEl = document.getElementById("summary-body");
+        var genBtn = document.getElementById("generate-summary");
+        var copySummaryBtn = document.getElementById("copy-summary");
+        var hasSpeakers = Object.keys(currentSpeakers).length > 0;
+
+        if (!currentSummary && !hasSpeakers && !currentSessionId) {
+          card.hidden = true;
+          return;
+        }
+        card.hidden = false;
+        bodyEl.replaceChildren();
+
+        if (!currentSummary) {
+          titleEl.textContent = "会后会议纪要";
+          genBtn.textContent = "生成纪要";
+          genBtn.className = "btn btn-sm btn-primary";
+          genBtn.hidden = !currentSessionId;
+          copySummaryBtn.hidden = true;
+          var emptyMsg = document.createElement("p");
+          emptyMsg.className = "summary-empty";
+          emptyMsg.textContent = "点击右上角“生成纪要”，让小秘书一键提炼会议主题、核心结论与待办清单。";
+          bodyEl.appendChild(emptyMsg);
+          renderSpeakersBar();
+          return;
+        }
+
+        titleEl.textContent = currentSummary.title || "会议纪要";
+        genBtn.textContent = "重新生成";
+        genBtn.className = "btn btn-sm";
+        genBtn.hidden = !currentSessionId;
+        copySummaryBtn.hidden = false;
+
+        if (currentSummary.overview) {
+          var ov = document.createElement("p");
+          ov.className = "summary-overview";
+          ov.textContent = currentSummary.overview;
+          bodyEl.appendChild(ov);
+        }
+
+        var decisions = Array.isArray(currentSummary.decisions) ? currentSummary.decisions : [];
+        var actions = Array.isArray(currentSummary.action_items) ? currentSummary.action_items : [];
+        if (decisions.length || actions.length) {
+          var grid = document.createElement("div");
+          grid.className = "summary-grid";
+
+          if (decisions.length) {
+            var decBlock = document.createElement("div");
+            decBlock.className = "summary-block";
+            var decH = document.createElement("h3");
+            decH.textContent = "核心结论";
+            var decUl = document.createElement("ul");
+            decUl.className = "summary-list";
+            decisions.forEach(function (d) {
+              var li = document.createElement("li");
+              li.textContent = d;
+              decUl.appendChild(li);
+            });
+            decBlock.append(decH, decUl);
+            grid.appendChild(decBlock);
+          }
+
+          if (actions.length) {
+            var actBlock = document.createElement("div");
+            actBlock.className = "summary-block";
+            var actH = document.createElement("h3");
+            actH.textContent = "待办事项";
+            var actUl = document.createElement("ul");
+            actUl.className = "action-list";
+            actions.forEach(function (item) {
+              var li = document.createElement("li");
+              li.className = "action-item";
+              var ownerRaw = item.owner || "待定";
+              var ownerText = currentSpeakerNames[ownerRaw]
+                || (ownerRaw.indexOf("speaker_") === 0 ? defaultSpeakerName(ownerRaw) : ownerRaw);
+              var tag = document.createElement("span");
+              tag.className = "action-owner";
+              tag.textContent = ownerText;
+              var taskSpan = document.createElement("span");
+              taskSpan.textContent = item.task || "";
+              if (item.deadline) {
+                var dl = document.createElement("span");
+                dl.className = "action-deadline";
+                dl.textContent = "（" + item.deadline + "）";
+                taskSpan.appendChild(dl);
+              }
+              li.append(tag, taskSpan);
+              actUl.appendChild(li);
+            });
+            actBlock.append(actH, actUl);
+            grid.appendChild(actBlock);
+          }
+          bodyEl.appendChild(grid);
+        }
+
+        var topics = Array.isArray(currentSummary.topics) ? currentSummary.topics : [];
+        if (topics.length) {
+          var tWrap = document.createElement("div");
+          tWrap.className = "summary-block topic-group";
+          var tH = document.createElement("h3");
+          tH.textContent = "议题要点";
+          var tGrid = document.createElement("div");
+          tGrid.className = "topic-items";
+          topics.forEach(function (t) {
+            var item = document.createElement("div");
+            item.className = "topic-item";
+            var name = document.createElement("div");
+            name.className = "topic-name";
+            name.textContent = t.topic || "讨论要点";
+            item.appendChild(name);
+            var pts = Array.isArray(t.points) ? t.points : [];
+            if (pts.length) {
+              var ul = document.createElement("ul");
+              ul.className = "summary-list";
+              pts.forEach(function (pt) {
+                var li = document.createElement("li");
+                li.textContent = pt;
+                ul.appendChild(li);
+              });
+              item.appendChild(ul);
+            }
+            tGrid.appendChild(item);
+          });
+          tWrap.append(tH, tGrid);
+          bodyEl.appendChild(tWrap);
+        }
+
+        renderSpeakersBar();
       }
 
       function applyMapping(mapping) {
@@ -527,41 +1938,79 @@
           var value = mapping[uttId];
           if (!row || !value || value.spk === null || typeof value.spk === "undefined") return;
           var label = value.spk_label || ("speaker_" + value.spk);
+          var spkNum = Number(value.spk);
+          currentSpeakers[label] = spkNum;
           var badge = document.createElement("span");
           badge.className = "spk-badge";
-          badge.textContent = label;
-          badge.style.backgroundColor = speakerColors[Math.abs(Number(value.spk)) % speakerColors.length];
+          badge.textContent = resolveSpeakerName(label, spkNum);
+          badge.style.backgroundColor = speakerColors[Math.abs(spkNum) % speakerColors.length];
           row.speakerSlot.replaceChildren(badge);
-          row.speaker = Number(value.spk);
+          row.speaker = spkNum;
           row.speakerLabel = label;
         });
+        renderSpeakersBar();
+      }
+
+      function syncActionButtons(active) {
+        var startBtn = document.getElementById("start-meeting");
+        var endBtn = document.getElementById("end-meeting");
+        var simBtn = document.getElementById("simulate-audio");
+        var fastBtn = document.getElementById("simulate-audio-fast");
+        var hasFile = !!(document.getElementById("audio-file").files && document.getElementById("audio-file").files.length);
+
+        if (active) {
+          startBtn.hidden = true;
+          endBtn.hidden = false;
+          endBtn.disabled = false;
+          simBtn.disabled = true;
+          fastBtn.disabled = true;
+        } else {
+          startBtn.hidden = false;
+          startBtn.disabled = false;
+          endBtn.hidden = true;
+          endBtn.disabled = true;
+          simBtn.disabled = !hasFile;
+          fastBtn.disabled = !hasFile;
+          fastBtn.hidden = !hasFile;
+        }
+      }
+
+      function syncDeleteButton() {
+        var delBtn = document.getElementById("delete-session");
+        var sel = document.getElementById("history-session-select");
+        if (delBtn && sel) {
+          delBtn.disabled = !sel.value;
+        }
       }
 
       function handleEvent(event) {
         if (!event || typeof event.t !== "string") return;
         var row;
         var spanKey = event.source_utt_id || event.utt_id;
+
         if (event.t === "asr_partial") {
           row = getRow(event);
           currentUttId = event.utt_id;
-          if (!row.time.dataset.start) {
-            row.time.dataset.start = String(event.start_ms || 0);
-          }
-          row.time.textContent = formatRange(Number(row.time.dataset.start || event.start_ms || 0), null);
+          if (typeof row.startMs !== "number") row.startMs = Number(event.start_ms) || 0;
+          row.time.textContent = formatRange(row.startMs, null);
+          row.state.hidden = false;
           row.state.className = "utt-state";
-          row.state.textContent = "正在识别";
+          row.state.textContent = "记录中";
           setSentence(row, spanKey, event.text || "", "draft-italic");
           markTyping(row, true);
-          document.getElementById("transcript-hint").textContent = "正在接收语音，字幕会随识别结果展开";
+          document.getElementById("transcript-hint").textContent = "正在实时转写会议发言...";
         } else if (event.t === "asr_final") {
           row = getRow(event);
-          if (!row.time.dataset.start) {
-            row.time.dataset.start = String(event.start_ms || 0);
+          if (typeof row.startMs !== "number") row.startMs = Number(event.start_ms) || 0;
+          row.endMs = Number(event.end_ms) || row.startMs;
+          row.time.textContent = formatRange(row.startMs, row.endMs);
+          if (!document.body.classList.contains("is-diarized")) {
+            row.state.hidden = false;
+            row.state.className = "utt-state is-pending";
+            row.state.textContent = "润色中";
+          } else {
+            row.state.hidden = true;
           }
-          row.time.dataset.end = String(event.end_ms || 0);
-          row.time.textContent = formatRange(Number(row.time.dataset.start), event.end_ms);
-          row.state.className = "utt-state is-pending";
-          row.state.textContent = "润色中";
           var rawStr = String(event.raw_text || "");
           setSentence(row, spanKey, rawStr, "confirmed-normal", {
             final: cleanSpaces(rawStr),
@@ -570,16 +2019,12 @@
           });
           updateRawTooltip(row, spanKey, rawStr);
           markTyping(row, false);
-          document.getElementById("transcript-hint").textContent = "句尾已确认，正在进行异步校正";
         } else if (event.t === "llm_confirmed") {
           row = getRow(event);
-          if (!row.time.dataset.start && typeof event.start_ms === "number") {
-            row.time.dataset.start = String(event.start_ms);
-          }
-          row.time.dataset.end = String(event.end_ms || 0);
-          row.time.textContent = formatRange(Number(row.time.dataset.start || event.start_ms || 0), event.end_ms);
-          row.state.className = "utt-state is-confirmed";
-          row.state.textContent = resolveBadgeText(event);
+          if (typeof row.startMs !== "number" && typeof event.start_ms === "number") row.startMs = event.start_ms;
+          row.endMs = Number(event.end_ms) || row.startMs || 0;
+          row.time.textContent = formatRange(row.startMs || 0, row.endMs);
+          row.state.hidden = true;
           var finalStr = cleanSpaces(event.polished_text || event.raw_text || "");
           var streamStr = cleanSpaces(event.stream_text || event.polished_text || event.raw_text || "");
           var rawOrig = String(event.raw_text || finalStr);
@@ -588,259 +2033,414 @@
             stream: streamStr,
             raw: rawOrig
           });
-          if (event.raw_text) {
-            updateRawTooltip(row, spanKey, event.raw_text);
-          }
+          if (event.raw_text) updateRawTooltip(row, spanKey, event.raw_text);
           markTyping(row, false);
-          if (currentUttId === event.utt_id) {
-            currentUttId = null;
-          }
-          document.getElementById("transcript-hint").textContent = "校正完成，字幕已固化";
+          if (currentUttId === event.utt_id) currentUttId = null;
+          document.getElementById("transcript-hint").textContent = "字幕已实时润色";
         } else if (event.t === "progress") {
           var backfill = document.getElementById("backfill");
           backfill.hidden = false;
+          setStatus("会后整理中", "busy");
           var total = Math.max(0, Number(event.total) || 0);
           var done = Math.max(0, Math.min(total || Number(event.done) || 0, Number(event.done) || 0));
           var percent = total ? Math.round(done / total * 100) : 0;
-          var estSuffix = event.estimated ? " (预计耗时)" : "";
-          document.getElementById("progress-copy").textContent = (event.msg || "正在处理") + estSuffix;
-          document.getElementById("progress-value").textContent = total
-            ? (done + " / " + total)
-            : (percent + "%");
-          document.getElementById("progress-fill").style.width = percent + "%";
+          var friendlyCopy = resolveStageHint(event.stage, event.msg);
+          document.getElementById("progress-copy").textContent = friendlyCopy;
+          document.getElementById("progress-value").textContent = total ? (percent + "%") : "处理中";
+          document.getElementById("progress-fill").style.width = Math.max(percent, 8) + "%";
           document.getElementById("progress-track").setAttribute("aria-valuenow", String(percent));
-          document.getElementById("progress-status").textContent = event.stage || "会后处理中";
-          document.getElementById("transcript-hint").textContent = resolveStageHint(event.stage, event.msg);
+          document.getElementById("progress-status").textContent = "请稍候，整理完成后会自动展示会议纪要与发言人。";
+          document.getElementById("transcript-hint").textContent = friendlyCopy;
         } else if (event.t === "speaker_diarized") {
-          document.getElementById("backfill").hidden = false;
+          document.getElementById("backfill").hidden = true;
+          if (event.session_id) currentSessionId = event.session_id;
+          if (event.speaker_names && typeof event.speaker_names === "object") {
+            currentSpeakerNames = Object.assign({}, event.speaker_names);
+          }
           applyMapping(event.mapping);
-          document.getElementById("progress-copy").textContent = "说话人回填完成";
-          document.getElementById("progress-value").textContent = "已完成";
-          document.getElementById("progress-fill").style.width = "100%";
-          document.getElementById("progress-track").setAttribute("aria-valuenow", "100");
-          document.getElementById("progress-status").textContent = (event.n_clusters || "完成") + " 位说话人";
+          if (currentSessionId && event.has_audio !== false) {
+            setAudioSource(currentSessionId, true);
+          }
+          renderSummaryCard();
+          applyFilters();
+        } else if (event.t === "meeting_summary") {
+          if (event.session_id) currentSessionId = event.session_id;
+          currentSummary = event.summary || null;
+          if (event.speaker_names && typeof event.speaker_names === "object") {
+            currentSpeakerNames = Object.assign({}, event.speaker_names);
+            refreshSpeakerBadges();
+          }
+          renderSummaryCard();
         } else if (event.t === "error") {
-          showNotice(event.msg || "处理过程中发生错误", !!event.fatal);
-          if (event.fatal) setStatus("处理失败", "error");
+          showNotice(event.msg || "处理过程中遇到一点问题，请稍后重试", !!event.fatal);
+          if (event.fatal) {
+            setStatus("处理未完成", "error");
+            syncActionButtons(false);
+          }
         } else if (event.t === "finish") {
-          setStatus("会议已完成", "done");
-          document.getElementById("transcript-hint").textContent = "会议处理完成（可切换顶部“最终定稿 / 直播润色稿 / 原始识别稿”对比，或悬停查看原稿）";
-          document.getElementById("start-meeting").disabled = false;
-          document.getElementById("end-meeting").disabled = true;
-          var hasAudio = !!(document.getElementById("audio-file").files && document.getElementById("audio-file").files.length);
-          document.getElementById("simulate-audio").disabled = !hasAudio;
-          document.getElementById("simulate-audio-fast").disabled = !hasAudio;
+          if (event.session_id) currentSessionId = event.session_id;
+          document.getElementById("backfill").hidden = true;
+          setStatus("整理完成", "done");
+          document.getElementById("transcript-hint").textContent = hasSessionAudio
+            ? "点击任意发言时间即可回放对应原声；点击发言人可筛选或改名。"
+            : "会议已整理完成，点击发言人可筛选或改名。";
+          syncActionButtons(false);
+          syncDeleteButton();
+          renderSummaryCard();
         }
       }
 
-      // [C7] 构建 Markdown 文本供复制/导出
+      /* 导出/复制 Markdown（支持仅纪要摘要 & 完整记录） */
+      function buildSummaryMarkdownOnly() {
+        if (!currentSummary) return "";
+        var lines = [];
+        lines.push("# " + (currentSummary.title || "会议纪要"), "");
+        if (currentSummary.overview) {
+          lines.push("> **核心摘要**：" + currentSummary.overview, "");
+        }
+        if (Array.isArray(currentSummary.decisions) && currentSummary.decisions.length) {
+          lines.push("## 核心结论", "");
+          currentSummary.decisions.forEach(function (d) { lines.push("- " + d); });
+          lines.push("");
+        }
+        if (Array.isArray(currentSummary.action_items) && currentSummary.action_items.length) {
+          lines.push("## 待办事项", "");
+          currentSummary.action_items.forEach(function (item) {
+            var ownerRaw = item.owner || "待定";
+            var owner = currentSpeakerNames[ownerRaw]
+              || (ownerRaw.indexOf("speaker_") === 0 ? defaultSpeakerName(ownerRaw) : ownerRaw);
+            var suffix = item.deadline ? ("（截止：" + item.deadline + "）") : "";
+            lines.push("- [ ] **" + owner + "**：" + (item.task || "") + suffix);
+          });
+          lines.push("");
+        }
+        if (Array.isArray(currentSummary.topics) && currentSummary.topics.length) {
+          lines.push("## 议题要点", "");
+          currentSummary.topics.forEach(function (t) {
+            lines.push("### " + (t.topic || "讨论要点"));
+            (t.points || []).forEach(function (pt) { lines.push("- " + pt); });
+            lines.push("");
+          });
+        }
+        return lines.join("\n").trim() + "\n";
+      }
+
       function buildMarkdownTranscript() {
-        var lines = ["# 会议记录 (" + currentViewMode + ")", ""];
-        rows.forEach(function (row, uttId) {
-          var spk = row.speakerLabel || "未定说话人";
+        var lines = [];
+        if (currentSummary) {
+          lines.push(buildSummaryMarkdownOnly().trim(), "");
+        } else {
+          lines.push("# 会议记录", "");
+        }
+        lines.push("## 发言记录", "");
+        rows.forEach(function (row) {
+          var spk = resolveSpeakerName(row.speakerLabel, row.speaker);
           var timeRange = row.time.textContent || "";
-          var badge = row.state.textContent || "";
           var body = (row.text.textContent || "").trim();
-          lines.push("- **" + spk + "** (`" + timeRange + "` · " + badge + " · `" + uttId + "`): " + body);
+          if (!body) return;
+          lines.push("- **" + spk + "**（" + timeRange + "）：" + body);
         });
-        return lines.join("\n");
+        return lines.join("\n").trim() + "\n";
+      }
+
+      function copyText(content, okMsg) {
+        if (!content) return;
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(content).then(function () {
+            showNotice(okMsg, "success");
+          }).catch(function () {
+            showNotice("浏览器禁止自动复制，请使用“导出文档”下载", true);
+          });
+        }
       }
 
       function resetSession(options) {
         var keepFile = !!(options && options.keepFile);
-        rows.forEach(function (r) {
-          if (r.typingTimer) clearTimeout(r.typingTimer);
-        });
+        rows.forEach(function (r) { if (r.typingTimer) clearTimeout(r.typingTimer); });
         rows.clear();
         currentUttId = null;
+        currentSessionId = null;
+        currentSummary = null;
+        currentSpeakerNames = {};
+        currentSpeakers = {};
+        activeSpeakerFilter = null;
+        searchQuery = "";
+        document.getElementById("transcript-search").value = "";
+        document.getElementById("search-clear").hidden = true;
+        document.getElementById("filter-empty").hidden = true;
+        setAudioSource(null, false);
+
+        document.getElementById("summary-card").hidden = true;
+        document.getElementById("summary-body").replaceChildren();
+        document.getElementById("speakers-bar").hidden = true;
+        document.getElementById("speakers-bar").replaceChildren();
         transcript.replaceChildren();
         document.getElementById("utterance-count").textContent = "0";
-        document.getElementById("transcript-hint").textContent = "会议尚未开始";
+        document.getElementById("transcript-hint").textContent = "准备就绪";
         document.getElementById("backfill").hidden = true;
-        document.getElementById("progress-copy").textContent = "说话人回填";
-        document.getElementById("progress-value").textContent = "等待中";
         document.getElementById("progress-fill").style.width = "0";
-        document.getElementById("progress-track").setAttribute("aria-valuenow", "0");
-        document.getElementById("progress-status").textContent = "按整段录音识别说话人。";
-        document.getElementById("start-meeting").disabled = false;
-        document.getElementById("end-meeting").disabled = false;
+
         if (!keepFile) {
           document.getElementById("audio-file").value = "";
-          document.getElementById("audio-name").textContent = "尚未选择文件";
-          document.getElementById("simulate-audio").disabled = true;
-          document.getElementById("simulate-audio-fast").disabled = true;
-        } else {
-          var hasFile = !!(document.getElementById("audio-file").files && document.getElementById("audio-file").files.length);
-          document.getElementById("simulate-audio").disabled = !hasFile;
-          document.getElementById("simulate-audio-fast").disabled = !hasFile;
+          var nameEl = document.getElementById("audio-name");
+          nameEl.textContent = "支持拖拽录音文件到此处，自动整理发言与纪要";
+          nameEl.classList.remove("has-file");
+          var sel = document.getElementById("history-session-select");
+          if (sel) sel.value = "";
         }
+        syncActionButtons(false);
+        syncDeleteButton();
         clearNotice();
         setStatus("准备就绪", "");
+
         var empty = document.createElement("div");
         empty.className = "empty-state";
         empty.id = "empty-state";
-        var title = document.createElement("strong");
-        title.textContent = "等待语音输入";
-        var detail = document.createElement("span");
-        detail.textContent = "点击“开始会议”接入麦克风录音，或选择音频文件点击“开始模拟 / ⚡ 快速模拟”。";
-        empty.append(title, detail);
+        empty.innerHTML =
+          '<div class="empty-icon" aria-hidden="true">' +
+          '<svg class="icon" viewBox="0 0 24 24"><rect x="9" y="2" width="6" height="12" rx="3"></rect><path d="M5 10a7 7 0 0 0 14 0"></path><path d="M12 17v4"></path><path d="M8 21h8"></path></svg>' +
+          '</div>' +
+          '<strong>准备好记录你的下一场会议</strong>' +
+          '<span>点击左上角“开始录音”，或直接拖入本地录音文件，会后自动区分发言人并提炼会议纪要。</span>';
         transcript.appendChild(empty);
-        if (keepFile) {
-          return;
-        }
+
+        if (keepFile) return;
+
+        var moreMenu = document.getElementById("more-menu");
+        if (moreMenu) moreMenu.open = false;
+
         var resetTask = null;
         if (typeof window.MeetingUI.onReset === "function") {
           resetTask = window.MeetingUI.onReset();
         }
         if (resetTask && typeof resetTask.then === "function") {
-          var startButton = document.getElementById("start-meeting");
-          var endButton = document.getElementById("end-meeting");
-          var resetButton = document.getElementById("reset-session");
-          var simulateButton = document.getElementById("simulate-audio");
-          var fastButton = document.getElementById("simulate-audio-fast");
-          startButton.disabled = true;
-          endButton.disabled = true;
-          resetButton.disabled = true;
-          simulateButton.disabled = true;
-          fastButton.disabled = true;
-          document.getElementById("transcript-hint").textContent = "正在停止上一场会议...";
-          setStatus("正在重置", "live");
+          setStatus("正在清空", "busy");
           resetTask.then(function () {
-            startButton.disabled = false;
-            endButton.disabled = false;
-            resetButton.disabled = false;
-            var hasSelected = !!(document.getElementById("audio-file").files && document.getElementById("audio-file").files.length);
-            simulateButton.disabled = !hasSelected;
-            fastButton.disabled = !hasSelected;
-            document.getElementById("transcript-hint").textContent = "重置完成，可以开始新会议";
             setStatus("准备就绪", "");
           }).catch(function (error) {
-            resetButton.disabled = false;
-            document.getElementById("transcript-hint").textContent = "上一场会议仍在停止，可稍后再次重置";
-            setStatus("重置未完成", "error");
+            setStatus("清空未完成", "error");
             showNotice(String(error), true);
           });
         }
       }
 
+      function applySelectedFile(file) {
+        var nameEl = document.getElementById("audio-name");
+        var fastBtn = document.getElementById("simulate-audio-fast");
+        var simBtn = document.getElementById("simulate-audio");
+        if (file) {
+          nameEl.textContent = file.name;
+          nameEl.classList.add("has-file");
+          fastBtn.hidden = false;
+          fastBtn.disabled = false;
+          simBtn.disabled = false;
+        } else {
+          nameEl.textContent = "支持拖拽录音文件到此处，自动整理发言与纪要";
+          nameEl.classList.remove("has-file");
+          fastBtn.hidden = true;
+          fastBtn.disabled = true;
+          simBtn.disabled = true;
+        }
+        clearNotice();
+      }
+
       function startMeeting() {
         clearNotice();
         if (typeof window.MeetingUI.onStart === "function") {
-          setStatus("会议进行中", "live");
-          document.getElementById("transcript-hint").textContent = "麦克风已启动，点击“结束会议”完成录音并执行转写与说话人分离";
-          document.getElementById("start-meeting").disabled = true;
-          document.getElementById("simulate-audio").disabled = true;
-          document.getElementById("simulate-audio-fast").disabled = true;
+          setStatus("录音中", "live");
+          syncActionButtons(true);
+          document.getElementById("transcript-hint").textContent = "麦克风正在录音，点击“结束并整理”自动生成发言人与会议纪要";
           window.MeetingUI.onStart();
-        } else {
-          setStatus("等待麦克风接入", "");
-          document.getElementById("transcript-hint").textContent = "麦克风接入接口已预留，接入后这里会实时显示转写";
         }
       }
 
       function endMeeting() {
         clearNotice();
         if (typeof window.MeetingUI.onEnd === "function") {
-          document.getElementById("transcript-hint").textContent = "正在结束会议";
           document.getElementById("end-meeting").disabled = true;
+          setStatus("正在收尾", "busy");
           window.MeetingUI.onEnd();
-        } else {
-          setStatus("等待回填服务", "done");
-          document.getElementById("transcript-hint").textContent = "结束会议按钮已预留，接入服务后将启动离线说话人回填";
-          document.getElementById("start-meeting").disabled = true;
-          document.getElementById("end-meeting").disabled = true;
-          document.getElementById("simulate-audio").disabled = true;
-          document.getElementById("simulate-audio-fast").disabled = true;
         }
       }
 
       function triggerSimulation(isFast) {
-        var file = document.getElementById("audio-file").files[0];
+        var input = document.getElementById("audio-file");
+        var file = input.files && input.files[0];
         if (!file) return;
+        var moreMenu = document.getElementById("more-menu");
+        if (moreMenu) moreMenu.open = false;
         clearNotice();
         if (typeof window.MeetingUI.onAudioSimulation === "function") {
-          setStatus(isFast ? "快速模拟中" : "音频模拟中", "live");
+          setStatus(isFast ? "正在整理录音" : "实时演示中", "busy");
+          syncActionButtons(true);
           document.getElementById("transcript-hint").textContent = isFast
-            ? "正在全速流式转写并准备说话人分离 (已跳过 1x 实时等待)..."
-            : "正在按 1x 实时语速使用所选音频模拟会议...";
-          document.getElementById("start-meeting").disabled = true;
-          document.getElementById("end-meeting").disabled = false;
-          document.getElementById("simulate-audio").disabled = true;
-          document.getElementById("simulate-audio-fast").disabled = true;
+            ? "正在读取录音并自动整理发言人与会议纪要..."
+            : "正在按 1× 实时语速演示字幕流...";
           window.MeetingUI.onAudioSimulation(file, { fast: !!isFast });
-        } else {
-          showNotice("音频模拟接口已预留，接入服务后即可把所选文件送入流式流程。", false);
         }
       }
 
-      document.getElementById("start-meeting").addEventListener("click", startMeeting);
-      document.getElementById("reset-session").addEventListener("click", function () {
-        resetSession({ keepFile: false });
+      /* 拖拽上传录音 */
+      var dropBar = document.getElementById("workspace-bar");
+      dropBar.addEventListener("dragover", function (ev) {
+        ev.preventDefault();
+        dropBar.classList.add("is-dragover");
       });
-      document.getElementById("end-meeting").addEventListener("click", endMeeting);
-      document.getElementById("audio-file").addEventListener("change", function (event) {
-        var file = event.target.files && event.target.files[0];
-        document.getElementById("audio-name").textContent = file ? file.name : "尚未选择文件";
-        document.getElementById("simulate-audio").disabled = !file;
-        document.getElementById("simulate-audio-fast").disabled = !file;
-        clearNotice();
+      dropBar.addEventListener("dragleave", function () {
+        dropBar.classList.remove("is-dragover");
       });
-      document.getElementById("simulate-audio").addEventListener("click", function () {
-        triggerSimulation(false);
-      });
-      document.getElementById("simulate-audio-fast").addEventListener("click", function () {
+      dropBar.addEventListener("drop", function (ev) {
+        ev.preventDefault();
+        dropBar.classList.remove("is-dragover");
+        var files = ev.dataTransfer && ev.dataTransfer.files;
+        if (!files || !files.length) return;
+        var file = files[0];
+        var input = document.getElementById("audio-file");
+        try {
+          var dt = new DataTransfer();
+          dt.items.add(file);
+          input.files = dt.files;
+        } catch (err) {}
+        applySelectedFile(file);
         triggerSimulation(true);
       });
 
-      // [A5] 绑定三态文本版本切换按钮
+      /* 绑定按钮事件 */
+      document.getElementById("start-meeting").addEventListener("click", startMeeting);
+      document.getElementById("end-meeting").addEventListener("click", endMeeting);
+      document.getElementById("reset-session").addEventListener("click", function () {
+        resetSession({ keepFile: false });
+      });
+      document.getElementById("audio-file").addEventListener("change", function (event) {
+        applySelectedFile(event.target.files && event.target.files[0]);
+      });
+      document.getElementById("simulate-audio").addEventListener("click", function () { triggerSimulation(false); });
+      document.getElementById("simulate-audio-fast").addEventListener("click", function () { triggerSimulation(true); });
+
+      /* 点击空白处收起“更多选项”菜单 */
+      document.addEventListener("click", function (ev) {
+        var menu = document.getElementById("more-menu");
+        if (menu && menu.open && !menu.contains(ev.target)) {
+          menu.open = false;
+        }
+      });
+
+      /* 搜索与筛选 */
+      var searchInput = document.getElementById("transcript-search");
+      var searchClear = document.getElementById("search-clear");
+      searchInput.addEventListener("input", function () {
+        searchQuery = searchInput.value;
+        searchClear.hidden = !searchQuery;
+        applyFilters();
+      });
+      searchClear.addEventListener("click", function () {
+        searchInput.value = "";
+        searchQuery = "";
+        searchClear.hidden = true;
+        searchInput.focus();
+        applyFilters();
+      });
+      document.getElementById("clear-filters").addEventListener("click", function () {
+        activeSpeakerFilter = null;
+        searchInput.value = "";
+        searchQuery = "";
+        searchClear.hidden = true;
+        renderSpeakersBar();
+        applyFilters();
+      });
+
+      /* 三态视图切换（隐藏在更多选项内） */
       var viewButtons = document.querySelectorAll("[data-view-mode]");
       viewButtons.forEach(function (btn) {
         btn.addEventListener("click", function () {
           currentViewMode = btn.getAttribute("data-view-mode") || "final";
           viewButtons.forEach(function (b) { b.classList.toggle("is-active", b === btn); });
-          refreshAllRowViews();
+          applyFilters();
         });
       });
 
-      // [C7] 绑定复制与导出按钮
-      document.getElementById("copy-transcript").addEventListener("click", function () {
-        if (!rows.size) {
-          showNotice("当前没有可复制的转写内容", false);
+      /* 复制纪要 / 复制全文 / 导出文档 */
+      document.getElementById("copy-summary").addEventListener("click", function () {
+        var md = buildSummaryMarkdownOnly();
+        if (!md) {
+          showNotice("当前还没有可复制的会议纪要", false);
           return;
         }
-        var md = buildMarkdownTranscript();
-        if (navigator.clipboard && navigator.clipboard.writeText) {
-          navigator.clipboard.writeText(md).then(function () {
-            showNotice("已复制当前视图的会议记录到剪贴板", false);
-          }).catch(function () {
-            showNotice("复制失败，请使用“导出纪要”下载文件", true);
-          });
+        copyText(md, "已复制精炼会议纪要，可直接粘贴发群或邮件");
+      });
+      document.getElementById("copy-transcript").addEventListener("click", function () {
+        if (!rows.size) {
+          showNotice("当前还没有可复制的发言记录", false);
+          return;
         }
+        copyText(buildMarkdownTranscript(), "已复制会议纪要与完整发言记录");
       });
       document.getElementById("export-markdown").addEventListener("click", function () {
         if (!rows.size) {
-          showNotice("当前没有可导出的转写内容", false);
+          showNotice("当前还没有可导出的内容", false);
           return;
         }
         var md = buildMarkdownTranscript();
+        var baseName = (currentSummary && currentSummary.title)
+          ? currentSummary.title.replace(/[\\/:*?"<>|]/g, "_")
+          : (currentSessionId || "会议纪要");
         var blob = new Blob([md], { type: "text/markdown;charset=utf-8" });
         var a = document.createElement("a");
         a.href = URL.createObjectURL(blob);
-        a.download = "meeting_" + currentViewMode + ".md";
+        a.download = baseName + ".md";
         document.body.appendChild(a);
         a.click();
         a.remove();
       });
 
+      /* 按需生成/重生成纪要（原位替换加载提示与结果） */
+      document.getElementById("generate-summary").addEventListener("click", function () {
+        if (!currentSessionId || typeof window.MeetingUI.onGenerateSummary !== "function") return;
+        var btn = document.getElementById("generate-summary");
+        var bodyEl = document.getElementById("summary-body");
+        var hadSummary = !!currentSummary;
+        clearNotice();
+        btn.disabled = true;
+        btn.textContent = "整理中...";
+        if (!hadSummary && bodyEl) {
+          var loading = document.createElement("p");
+          loading.className = "summary-empty";
+          loading.textContent = "小秘书正在通读本场发言并提炼主题、结论与待办，大约需要几秒钟...";
+          bodyEl.replaceChildren(loading);
+        }
+        Promise.resolve(window.MeetingUI.onGenerateSummary(currentSessionId))
+          .finally(function () {
+            btn.disabled = false;
+            btn.textContent = currentSummary ? "重新生成" : "生成纪要";
+            if (!currentSummary) renderSummaryCard();
+          });
+      });
+
+      /* 删除历史会议 */
+      document.getElementById("delete-session").addEventListener("click", function () {
+        var sel = document.getElementById("history-session-select");
+        var sid = sel && sel.value;
+        if (!sid || typeof window.MeetingUI.onDeleteSession !== "function") return;
+        var label = sel.options[sel.selectedIndex] ? sel.options[sel.selectedIndex].textContent : sid;
+        if (!window.confirm("确定要删除这条历史会议记录吗？删除后无法恢复：\n" + label)) {
+          return;
+        }
+        window.MeetingUI.onDeleteSession(sid);
+      });
+
       window.MeetingUI = {
         handleEvent: handleEvent,
         reset: resetSession,
+        setAudioSource: setAudioSource,
+        syncDeleteButton: syncDeleteButton,
         onStart: null,
         onEnd: null,
         onReset: null,
-        onAudioSimulation: null
+        onAudioSimulation: null,
+        onRenameSpeaker: null,
+        onGenerateSummary: null,
+        onDeleteSession: null
       };
-
     })();
   </script>
 </body>

@@ -86,6 +86,364 @@ def _default_session(wav_path, models, silence_ms=None):
                                 MAX_END_SILENCE_MS if silence_ms is None else silence_ms))
 
 
+def _copy_mono_ch0(src_wav, dst_wav: Path) -> int:
+    """把输入 16kHz WAV（多声道只取 ch0）写入 session_audio.wav，返回时长 ms。"""
+    import soundfile as sf
+
+    _validate_wav(src_wav)
+    data, sr = sf.read(str(src_wav), dtype="int16", always_2d=True)
+    mono = data[:, 0]
+    dst_wav.parent.mkdir(parents=True, exist_ok=True)
+    sf.write(str(dst_wav), mono, sr, subtype="PCM_16")
+    return int(len(mono) * 1000 // sr)
+
+
+def _run_diar_with_heartbeat(
+    store,
+    *,
+    total: int,
+    processed_ms: int,
+    models: Optional[Dict],
+    backfill_fn: Optional[Callable],
+    on_progress: Optional[Callable[[Dict], None]],
+    should_abort: Optional[Callable[[], bool]],
+) -> None:
+    from diar_backfill import run_backfill
+
+    estimate_s = _estimate_backfill_seconds(processed_ms)
+    started_at = time.monotonic()
+    stop = threading.Event()
+
+    def emit_progress(elapsed: float) -> None:
+        done = 0 if total <= 0 else min(
+            total - 1, max(0, int(total * elapsed / estimate_s))
+        )
+        _notify(on_progress, {
+            "t": "progress",
+            "stage": "diarization",
+            "done": done,
+            "total": total,
+            "estimated": True,
+            "msg": (f"说话人识别进行中：已用 {elapsed:.0f}s / 预计 {estimate_s:.0f}s"),
+        })
+
+    def heartbeat() -> None:
+        while not stop.wait(PROGRESS_INTERVAL_S):
+            emit_progress(time.monotonic() - started_at)
+
+    beat = None
+    if on_progress is not None and total > 0:
+        beat = threading.Thread(target=heartbeat, name="backfill-progress", daemon=True)
+        beat.start()
+        emit_progress(0.0)
+
+    try:
+        run_backfill(store.dir, models=models, backfill=backfill_fn)
+    finally:
+        stop.set()
+        if beat is not None:
+            beat.join()
+    if should_abort is None or not should_abort():
+        _notify(on_progress, {
+            "t": "progress",
+            "stage": "diarization",
+            "done": total,
+            "total": total,
+            "msg": "说话人识别完成",
+        })
+
+
+def _run_post_polish_and_summary(
+    store,
+    obj: Dict,
+    *,
+    no_llm: bool = False,
+    no_final_polish: bool = False,
+    no_summary: bool = False,
+    strict_polish: bool = False,
+    allow_default_summary: bool = True,
+    final_polish_fn: Optional[Callable] = None,
+    summary_fn: Optional[Callable] = None,
+    on_progress: Optional[Callable[[Dict], None]] = None,
+    should_abort: Optional[Callable[[], bool]] = None,
+) -> Dict:
+    aborted = bool(should_abort is not None and should_abort())
+
+    if not no_llm and not no_final_polish and not aborted:
+        turns = obj.get("turns") or []
+        if turns:
+            progress = lambda ev: _notify(on_progress, ev)  # noqa: E731
+            if final_polish_fn is not None:
+                polished_turns = final_polish_fn(
+                    turns, on_progress=progress, should_abort=should_abort)
+            else:
+                from final_polish import polish_turns
+                polished_turns = polish_turns(
+                    turns, on_progress=progress, should_abort=should_abort,
+                    strict=strict_polish)
+            if polished_turns:
+                store.write_turns_polished(polished_turns)
+                obj = store.build_session_json()
+
+    aborted = aborted or bool(should_abort is not None and should_abort())
+    should_run_summary = (
+        not no_llm
+        and not no_summary
+        and not aborted
+        and (summary_fn is not None or allow_default_summary)
+    )
+    if should_run_summary:
+        turns = obj.get("turns") or []
+        if turns:
+            progress = lambda ev: _notify(on_progress, ev)  # noqa: E731
+            try:
+                if summary_fn is not None:
+                    summary = summary_fn(
+                        turns, on_progress=progress, should_abort=should_abort)
+                else:
+                    from meeting_summary import summarize_meeting
+                    summary = summarize_meeting(
+                        turns, on_progress=progress, should_abort=should_abort)
+            except Exception:  # noqa: BLE001 - 小秘书失败绝不破坏会议定稿
+                summary = None
+            if should_abort is not None and should_abort():
+                aborted = True
+            elif isinstance(summary, dict) and summary:
+                store.write_summary(summary)
+                obj = store.build_session_json()
+    return obj
+
+
+def run_direct_offline(
+    wav,
+    session_dir,
+    *,
+    no_llm: bool = False,
+    no_diar: bool = False,
+    no_final_polish: bool = False,
+    no_summary: bool = False,
+    strict_polish: bool = False,
+    models: Optional[Dict] = None,
+    direct_asr_fn: Optional[Callable] = None,
+    backfill_fn: Optional[Callable] = None,
+    final_polish_fn: Optional[Callable] = None,
+    summary_fn: Optional[Callable] = None,
+    on_progress: Optional[Callable[[Dict], None]] = None,
+    should_abort: Optional[Callable[[], bool]] = None,
+) -> Dict:
+    """直通离线高精度管线（面向导入录音）：跳过慢且漏检的流式草稿，直接全覆盖转写 + 分人 + 并发精修 + 纪要。"""
+    bootstrap.install()
+    from session_store import SessionStore
+
+    store = SessionStore(Path(session_dir))
+    for stale in ("polished.json", "turns_polished.json", "final_text.json",
+                  "diarization.json", "summary.json", "speaker_names.json",
+                  "utterances.jsonl", "events.ndjson"):
+        (store.dir / stale).unlink(missing_ok=True)
+
+    duration_ms = _copy_mono_ch0(wav, store.audio_path)
+    if should_abort is not None and should_abort():
+        return store.build_session_json()
+
+    progress = lambda ev: _notify(on_progress, ev)  # noqa: E731
+    if direct_asr_fn is not None:
+        utterances, duration_ms = direct_asr_fn(
+            store.audio_path, on_progress=progress, should_abort=should_abort)
+    else:
+        from offline_asr import transcribe_audio_offline
+        vad_model = models.get("vad") if isinstance(models, dict) else None
+        utterances, duration_ms = transcribe_audio_offline(
+            store.audio_path,
+            vad_model=vad_model,
+            on_progress=progress,
+            should_abort=should_abort,
+        )
+
+    if should_abort is not None and should_abort():
+        return store.build_session_json()
+
+    transcript_rows = [
+        {
+            "utt_id": u["utt_id"],
+            "start_ms": int(u["start_ms"]),
+            "end_ms": int(u["end_ms"]),
+            "raw_text": u.get("raw_text") or u.get("final_text") or "",
+        }
+        for u in utterances
+    ]
+    for row in transcript_rows:
+        store.append_utterance(row)
+    store.write_transcript(transcript_rows, duration_ms=duration_ms)
+
+    final_map = {
+        u["utt_id"]: {
+            "text": u.get("final_text") or u.get("raw_text") or "",
+            "start_ms": int(u["start_ms"]),
+            "end_ms": int(u["end_ms"]),
+            "grouped_cont": False,
+        }
+        for u in utterances
+    }
+    if final_map:
+        store.write_final_text(final_map)
+    obj = store.build_session_json()
+
+    if not no_diar and transcript_rows and not (should_abort is not None and should_abort()):
+        if models is None and backfill_fn is None:
+            from web_server import get_models
+            models = get_models(need_stream=False, need_offline=False)
+        _run_diar_with_heartbeat(
+            store,
+            total=len(transcript_rows),
+            processed_ms=duration_ms,
+            models=models,
+            backfill_fn=backfill_fn,
+            on_progress=on_progress,
+            should_abort=should_abort,
+        )
+        obj = store.build_session_json()
+
+        # 若 diarization 拆出了句内换人子段（utt_xxx#N），仅对这些子段重跑一次精确离线解码
+        sub_utts = [u for u in obj.get("utterances", []) if "#" in str(u.get("utt_id", ""))]
+        if sub_utts and direct_asr_fn is None and not (should_abort is not None and should_abort()):
+            try:
+                from offline_asr import transcribe_utterances
+                sub_final = transcribe_utterances(
+                    store.audio_path,
+                    sub_utts,
+                    group_short=False,
+                    should_abort=should_abort,
+                )
+                if sub_final:
+                    final_map.update(sub_final)
+                    store.write_final_text(final_map)
+                    obj = store.build_session_json()
+            except Exception:  # noqa: BLE001
+                pass
+
+    return _run_post_polish_and_summary(
+        store,
+        obj,
+        no_llm=no_llm,
+        no_final_polish=no_final_polish,
+        no_summary=no_summary,
+        strict_polish=strict_polish,
+        allow_default_summary=(direct_asr_fn is None),
+        final_polish_fn=final_polish_fn,
+        summary_fn=summary_fn,
+        on_progress=on_progress,
+        should_abort=should_abort,
+    )
+
+
+def finalize_live_session(
+    session_dir,
+    completed_utterances: List[Dict],
+    processed_ms: int,
+    *,
+    models: Optional[Dict] = None,
+    no_llm: bool = False,
+    no_diar: bool = False,
+    no_final_asr: bool = False,
+    no_final_polish: bool = False,
+    no_summary: bool = False,
+    backfill_fn: Optional[Callable] = None,
+    offline_asr_fn: Optional[Callable] = None,
+    final_polish_fn: Optional[Callable] = None,
+    summary_fn: Optional[Callable] = None,
+    on_progress: Optional[Callable[[Dict], None]] = None,
+    should_abort: Optional[Callable[[], bool]] = None,
+) -> Dict:
+    """真实麦克风实时录音结束后的会后全流程：打捞流式漏检语音 → 说话人识别 → 连续离线二遍 → 并发精修 → 小秘书纪要。"""
+    bootstrap.install()
+    from session_store import SessionStore
+
+    store = SessionStore(Path(session_dir))
+    aborted = bool(should_abort is not None and should_abort())
+
+    merged_utts = list(completed_utterances)
+    recovered_final: Dict[str, Dict] = {}
+
+    # 1. 打捞流式 VAD 漏掉的真实语音空洞，补齐到句表里一起参与说话人识别
+    if not no_final_asr and not aborted and offline_asr_fn is None and store.audio_path.is_file():
+        try:
+            from offline_asr import recover_uncovered_spans
+            vad_model = models.get("vad") if isinstance(models, dict) else None
+            recovered = recover_uncovered_spans(
+                store.audio_path, merged_utts, vad_model=vad_model, should_abort=should_abort,
+            )
+            if recovered:
+                for item in recovered:
+                    merged_utts.append({
+                        "utt_id": item["utt_id"],
+                        "start_ms": item["start_ms"],
+                        "end_ms": item["end_ms"],
+                        "raw_text": item["raw_text"],
+                    })
+                    recovered_final[item["utt_id"]] = {
+                        "text": item["final_text"],
+                        "start_ms": item["start_ms"],
+                        "end_ms": item["end_ms"],
+                        "grouped_cont": False,
+                    }
+                merged_utts.sort(key=lambda u: (int(u["start_ms"]), int(u["end_ms"])))
+        except Exception:  # noqa: BLE001
+            pass
+
+    store.write_transcript(merged_utts, duration_ms=processed_ms)
+    if recovered_final:
+        store.write_final_text(recovered_final)
+    obj = store.build_session_json()
+
+    # 2. 说话人识别回填
+    aborted = aborted or bool(should_abort is not None and should_abort())
+    if not no_diar and not aborted and merged_utts:
+        _run_diar_with_heartbeat(
+            store,
+            total=len(merged_utts),
+            processed_ms=processed_ms,
+            models=models,
+            backfill_fn=backfill_fn,
+            on_progress=on_progress,
+            should_abort=should_abort,
+        )
+        obj = store.build_session_json()
+
+    # 3. 连续离线二遍高精度转写（跳过已经由离线 SEACO 直接打捞出的 utt_rec_*）
+    aborted = aborted or bool(should_abort is not None and should_abort())
+    if not no_final_asr and not aborted:
+        utterances = obj.get("utterances") or []
+        to_decode = [u for u in utterances if not str(u.get("utt_id", "")).startswith("utt_rec_")]
+        if to_decode:
+            try:
+                from offline_asr import transcribe_utterances
+                transcribe = offline_asr_fn or transcribe_utterances
+                final_text = transcribe(
+                    store.audio_path, to_decode,
+                    on_progress=lambda ev: _notify(on_progress, ev),
+                    should_abort=should_abort,
+                )
+            except Exception:  # noqa: BLE001
+                final_text = {}
+            if not (should_abort is not None and should_abort()) and (final_text or recovered_final):
+                combined_final = {**recovered_final, **final_text}
+                store.write_final_text(combined_final)
+                obj = store.build_session_json()
+
+    return _run_post_polish_and_summary(
+        store,
+        obj,
+        no_llm=no_llm,
+        no_final_polish=no_final_polish,
+        no_summary=no_summary,
+        allow_default_summary=True,
+        final_polish_fn=final_polish_fn,
+        summary_fn=summary_fn,
+        on_progress=on_progress,
+        should_abort=should_abort,
+    )
+
+
 def run(
     wav,
     session_dir,
@@ -93,10 +451,12 @@ def run(
     chunk_ms: int = 600,
     silence_ms: Optional[int] = None,
     fast: bool = False,
+    direct_offline: bool = False,
     no_llm: bool = False,
     no_diar: bool = False,
     no_final_polish: bool = False,
     no_final_asr: bool = False,
+    no_summary: bool = False,
     strict_polish: bool = False,
     max_seconds: float = 0.0,
     models: Optional[Dict] = None,
@@ -105,11 +465,28 @@ def run(
     backfill_fn: Optional[Callable] = None,
     final_polish_fn: Optional[Callable] = None,
     offline_asr_fn: Optional[Callable] = None,
+    summary_fn: Optional[Callable] = None,
     on_event: Optional[Callable[[Dict], None]] = None,
     on_progress: Optional[Callable[[Dict], None]] = None,
     should_stop: Optional[Callable[[], bool]] = None,
     should_abort: Optional[Callable[[], bool]] = None,
 ) -> Dict:
+    if direct_offline and not no_final_asr and session_factory is None:
+        return run_direct_offline(
+            wav,
+            session_dir,
+            no_llm=no_llm,
+            no_diar=no_diar,
+            no_final_polish=no_final_polish,
+            no_summary=no_summary,
+            strict_polish=strict_polish,
+            models=models,
+            backfill_fn=backfill_fn,
+            final_polish_fn=final_polish_fn,
+            summary_fn=summary_fn,
+            on_progress=on_progress,
+            should_abort=should_abort,
+        )
     _validate_wav(wav)
     bootstrap.install()
     from session_store import SessionStore
@@ -118,7 +495,8 @@ def run(
 
     # 复用已有 session 目录时，派生/追加文件必须清空，避免继承旧修正/标签或重复行
     for stale in ("polished.json", "turns_polished.json", "final_text.json",
-                  "diarization.json", "utterances.jsonl", "events.ndjson"):
+                  "diarization.json", "summary.json", "speaker_names.json",
+                  "utterances.jsonl", "events.ndjson"):
         (store.dir / stale).unlink(missing_ok=True)
 
     if models is None:
@@ -365,6 +743,34 @@ def run(
                 store.write_turns_polished(polished_turns)
                 obj = store.build_session_json()
 
+    # 会后小秘书：基于最终 turns 自动生成结构化会议纪要与发言人称呼推断
+    # 注入自定义 polisher_factory 的离线单测若未显式注入 summary_fn，不触发真实远程 LLM 调用
+    should_run_summary = (
+        not no_llm
+        and not no_summary
+        and not aborted
+        and (summary_fn is not None or polisher_factory is None)
+    )
+    if should_run_summary:
+        turns = obj.get("turns") or []
+        if turns:
+            progress = lambda ev: _notify(on_progress, ev)  # noqa: E731
+            try:
+                if summary_fn is not None:
+                    summary = summary_fn(
+                        turns, on_progress=progress, should_abort=should_abort)
+                else:
+                    from meeting_summary import summarize_meeting
+                    summary = summarize_meeting(
+                        turns, on_progress=progress, should_abort=should_abort)
+            except Exception:  # noqa: BLE001 - 小秘书失败绝不破坏会议定稿
+                summary = None
+            if should_abort is not None and should_abort():
+                aborted = True
+            elif isinstance(summary, dict) and summary:
+                store.write_summary(summary)
+                obj = store.build_session_json()
+
     return obj
 
 
@@ -378,12 +784,16 @@ def main(argv: Optional[List[str]] = None) -> int:
                         help="VAD 句尾静音阈值（默认 1000）；800 可显著降定稿延迟但句数变多")
     parser.add_argument("--max-seconds", type=float, default=0.0)
     parser.add_argument("--fast", action="store_true", help="全速推流，不按墙钟节流")
+    parser.add_argument("--direct-offline", action="store_true",
+                        help="跳过流式草稿，直接用 Pyannote 全覆盖切分 + SEACO 离线高精度转写（快且准）")
     parser.add_argument("--no-llm", action="store_true")
     parser.add_argument("--no-diar", action="store_true")
     parser.add_argument("--no-final-polish", action="store_true",
                         help="跳过会后按 speaker turn 的二次纠错")
     parser.add_argument("--no-final-asr", action="store_true",
                         help="跳过会后离线二遍转写（最终稿回退直播文本）")
+    parser.add_argument("--no-summary", action="store_true",
+                        help="跳过会后小秘书会议纪要生成")
     parser.add_argument("--strict-polish", action="store_true",
                         help="LLM 只做同音字原位替换+标点，非标点字数必须一致（测 CER 用）")
     args = parser.parse_args(argv)
@@ -403,10 +813,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     obj = run(
         Path(args.wav), session_dir,
         chunk_ms=args.chunk_ms, fast=args.fast,
+        direct_offline=args.direct_offline,
         silence_ms=args.silence_ms,
         no_llm=args.no_llm, no_diar=args.no_diar,
         no_final_polish=args.no_final_polish,
         no_final_asr=args.no_final_asr,
+        no_summary=args.no_summary,
         strict_polish=args.strict_polish,
         max_seconds=args.max_seconds,
     )

@@ -125,6 +125,23 @@ class SessionStore:
         _atomic_write_json(path, mapping)
         return path
 
+    def write_summary(self, summary: Dict[str, Any]) -> Path:
+        path = self.dir / "summary.json"
+        _atomic_write_json(path, summary)
+        return path
+
+    def write_speaker_names(self, names: Dict[str, str]) -> Path:
+        """持久化用户手工修改的说话人名称（空值条目自动移除）。"""
+        cleaned: Dict[str, str] = {}
+        for k, v in (names or {}).items():
+            key = str(k).strip()
+            val = str(v).strip() if v is not None else ""
+            if key and val:
+                cleaned[key] = val[:32]
+        path = self.dir / "speaker_names.json"
+        _atomic_write_json(path, cleaned)
+        return path
+
     def read_json(self, name: str) -> Optional[Dict[str, Any]]:
         path = self.dir / name
         if not path.exists():
@@ -133,12 +150,14 @@ class SessionStore:
             return json.loads(path.read_text(encoding="utf-8"))
 
     def build_session_json(self) -> Dict[str, Any]:
-        """读 transcript + 可选的 polished / diarization / final_text / turns_polished，幂等合成 session.json。"""
+        """读 transcript + 可选的 polished / diarization / final_text / turns_polished / summary / speaker_names，幂等合成 session.json。"""
         with self._merge_lock:
             transcript = self.read_json("transcript.json") or {"utterances": []}
             polished = self.read_json("polished.json") or {}
             diarization = self.read_json("diarization.json")
             final_text = self.read_json("final_text.json") or {}
+            summary = self.read_json("summary.json")
+            manual_names = self.read_json("speaker_names.json") or {}
 
             merged = []
             for utt in transcript.get("utterances", []):
@@ -198,6 +217,17 @@ class SessionStore:
                     turn["polish_status"] = "accepted" if actually_changed else "unchanged"
                     turn["corrected"] = actually_changed
 
+            # 合并发言人显示名：AI 推断作默认，用户手工改名（speaker_names.json）优先级最高
+            effective_names: Dict[str, str] = {}
+            if isinstance(summary, dict) and isinstance(summary.get("speaker_names"), dict):
+                for k, v in summary["speaker_names"].items():
+                    if k and isinstance(v, str) and v.strip():
+                        effective_names[str(k)] = v.strip()
+            if isinstance(manual_names, dict):
+                for k, v in manual_names.items():
+                    if k and isinstance(v, str) and v.strip():
+                        effective_names[str(k)] = v.strip()
+
             obj = {
                 "schema_version": SCHEMA_VERSION,
                 "session_id": self.session_id,
@@ -212,6 +242,8 @@ class SessionStore:
                 },
                 "utterances": merged,
                 "turns": turns,
+                "speaker_names": effective_names,
+                "summary": summary if isinstance(summary, dict) else None,
             }
             _atomic_write_json(self.dir / "session.json", obj)
             return obj

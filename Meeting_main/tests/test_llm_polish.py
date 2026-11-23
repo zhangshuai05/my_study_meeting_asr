@@ -246,3 +246,63 @@ def test_malformed_raw_text_does_not_kill_worker():
 
     assert "u_bad" in out
     assert "utt_0002" in out
+
+
+def test_short_fragment_does_not_force_period_unlike_standalone_reply():
+    results = []
+    polisher = Polisher(results.append, call=lambda prompt: '{"polished":"x"}')
+    polisher.submit({"t": "asr_final", "utt_id": "u1", "start_ms": 0, "end_ms": 500, "raw_text": "一台"})
+    polisher.submit({"t": "asr_final", "utt_id": "u2", "start_ms": 600, "end_ms": 1000, "raw_text": "嗯"})
+    out = polisher.close(timeout=5)
+
+    assert out["u1"]["bypassed"] is True
+    assert out["u1"]["polished_text"] == "一台"
+    assert out["u2"]["bypassed"] is True
+    assert out["u2"]["polished_text"] == "嗯。"
+
+
+def test_rolling_context_retains_topic_past_three_short_fragments():
+    prompts = []
+
+    def fake_call(prompt):
+        prompts.append(prompt)
+        return '{"polished": "继续讨论物业方案"}'
+
+    polisher = Polisher(lambda ev: None, call=fake_call)
+    polisher.submit({"t": "asr_final", "utt_id": "u1", "start_ms": 0, "end_ms": 3000,
+                     "raw_text": "今天主要讨论小区停车管理方案"})
+    for idx, frag in enumerate(("一台", "追个", "明白这个", "看看有没有这"), start=2):
+        polisher.submit({"t": "asr_final", "utt_id": f"u{idx}",
+                         "start_ms": idx * 1000 + 2000, "end_ms": idx * 1000 + 2600,
+                         "raw_text": frag})
+    polisher.submit({"t": "asr_final", "utt_id": "u6", "start_ms": 9200, "end_ms": 11000,
+                     "raw_text": "继续讨论物业方案"})
+    polisher.close(timeout=5)
+
+    # 经过多段短碎片后，最初的主题仍应保留在 800 字滚动上下文里
+    assert "继续讨论物业方案" in prompts[-1]
+    assert "停车" in prompts[1] or "继续讨论物业方案" in prompts[-1]
+    # u1 经过 fake_call 返回“继续讨论物业方案”，u6 之前应同时看到 u1 与中间碎片，而非被 3 句硬截断
+    assert "一台" in prompts[-1]
+    assert "追个" in prompts[-1]
+
+
+def test_continuity_hint_distinguishes_tight_gap_and_long_pause():
+    prompts = []
+
+    def fake_call(prompt):
+        prompts.append(prompt)
+        return '{"polished": "收到这段内容"}'
+
+    polisher = Polisher(lambda ev: None, call=fake_call)
+    polisher.submit({"t": "asr_final", "utt_id": "u1", "start_ms": 0, "end_ms": 2000,
+                     "raw_text": "第一句说完啦"})
+    polisher.submit({"t": "asr_final", "utt_id": "u2", "start_ms": 2600, "end_ms": 4000,
+                     "raw_text": "紧接着的第二句"})
+    polisher.submit({"t": "asr_final", "utt_id": "u3", "start_ms": 9000, "end_ms": 11000,
+                     "raw_text": "停顿很久后的第三句"})
+    polisher.close(timeout=5)
+
+    assert "会议开头或新话题起点" in prompts[0]
+    assert "紧接上一句" in prompts[1] and "收到这段内容" in prompts[1]
+    assert "有明显停顿" in prompts[2]
