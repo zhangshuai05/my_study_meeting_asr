@@ -7,8 +7,6 @@
 
 `Python 3.12` · `CPU only` · `离线` · `Windows / Linux`
 
-![实时会议记录](docs/images/demo.png)
-
 ---
 
 ## 它能做什么
@@ -29,26 +27,23 @@
 
 ## 架构
 
+```mermaid
+flowchart LR
+    A[16 kHz 单声道音频] --> B[流式 VAD<br/>切句 + 判端点]
+    B --> C[Paraformer Streaming<br/>600 ms 增量解码]
+    C --> D[asr_partial<br/>灰色斜体草稿]
+    B --> E[句尾静音 1 s<br/>asr_final 锁死时间戳]
+    E --> F[LLM 同音字纠错<br/>llm_confirmed]
+    A -.边收边写.-> W[(session_audio.wav<br/>采样点时钟)]
+    W --> H[会后说话人回填<br/>CAM++ 声纹聚类]
+    W --> I[离线二遍 ASR<br/>4–15 s 长段重转写]
+    D --> J[session.json<br/>终稿 + 说话人 + 时间轴]
+    F --> J
+    H --> J
+    I --> J
 ```
-          16 kHz 单声道音频
-                  │
-     ┌────────────┴─────────────┐
-     ▼                          ▼
- 实时旁路                    音频旁路
- 流式 VAD + Paraformer  ──►  session_audio.wav（采样点时钟的唯一真相）
-     │
-     ├─ asr_partial  ──►  灰色斜体草稿（600ms 一块）
-     ├─ asr_final    ──►  锁死时间戳，转正体，写入 utterances.jsonl
-     └─ llm_confirmed ─►  纠错后的文本
-                  │
-      ┌───────────┴────────────┐
-      ▼                        ▼
-  说话人回填                离线二遍 ASR
-  （CAM++ 聚类）            （4–15s 长段重转写）
-      └───────────┬────────────┘
-                  ▼
-            session.json（终稿 + 说话人 + 时间轴）
-```
+
+一条时间轴，两条后处理：左边保证"边说边出字"，右边保证"最后一份是准的"。
 
 ---
 
@@ -106,6 +101,28 @@ python -m pytest -m slow -k equivalence -v       # 事件级等价夹具（会�
 ---
 
 ## 实测数字
+
+延迟不是一个数，是四笔账叠出来的。下图是**为什么首字卡在 0.9 秒**：
+
+```mermaid
+flowchart LR
+    S([开始说话]) --> A[攒块<br/>0 – 600 ms]
+    A --> B[右上下文前瞻<br/>300 ms]
+    B --> C[推理<br/>≈ 170 ms]
+    C --> U([字上屏<br/>≈ 0.92 s])
+    U --> D[句尾静音判定<br/>1000 ms]
+    D --> F([定稿<br/>中位 1.25 s])
+
+    classDef fix fill:#f4f4f4,stroke:#bbb,color:#333
+    classDef cost fill:#fff3e0,stroke:#e0a040,color:#7a4a00
+    class A,B,D cost
+    class C fix
+```
+
+- **能砍的只有橙色三段**：攒块、前瞻、静音判定。
+- 但实测砍 chunk 到 300 ms 后首字仍是 926 ms（600 ms 时 918 ms）——**解码器要攒够上下文才吐第一个 token**，
+  这段不在账本里，砍不动。所以最终没改默认值。
+- 砍静音到 800 ms 能省 0.34 s 定稿延迟，代价是句数 ×1.5 且开始腰斩，做成开关不设默认。
 
 | 指标 | 数值 | 口径 |
 |---|---|---|
