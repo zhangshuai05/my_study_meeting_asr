@@ -376,3 +376,136 @@ def test_subturn_without_cosine_margin_is_not_returned():
     )
 
     assert sub_turns == {}
+
+
+def _unit_rows(x):
+    return x / (np.linalg.norm(x, axis=1, keepdims=True) + 1e-9)
+
+
+def test_fisher_merge_preserves_distinct_speakers_under_shared_room_bias():
+    """Distinct speakers sharing a strong room/channel cone (raw cos ~0.65) must NOT merge,
+    while two sub-clusters of the same speaker (near vs far) MUST merge."""
+    rng = np.random.RandomState(7)
+    dim = 64
+    room_bias = np.zeros(dim, dtype=np.float32)
+    room_bias[0] = 1.15  # strong shared channel vector
+
+    s0 = np.zeros(dim, dtype=np.float32); s0[1] = 0.85
+    s1 = np.zeros(dim, dtype=np.float32); s1[2] = 0.85
+    s2 = np.zeros(dim, dtype=np.float32); s2[3] = 0.85
+    s2_shift = s2.copy(); s2_shift[4] = 0.15  # mild distance shift of same speaker s2
+
+    c0 = _unit_rows(room_bias + s0 + 0.06 * rng.randn(30, dim).astype(np.float32))
+    c1 = _unit_rows(room_bias + s1 + 0.06 * rng.randn(30, dim).astype(np.float32))
+    c2a = _unit_rows(room_bias + s2 + 0.06 * rng.randn(20, dim).astype(np.float32))
+    c2b = _unit_rows(room_bias + s2_shift + 0.06 * rng.randn(20, dim).astype(np.float32))
+    E = np.vstack([c0, c1, c2a, c2b])
+    labels = np.asarray([0] * 30 + [1] * 30 + [2] * 20 + [3] * 20, dtype=int)
+
+    # Confirm raw centroid cosine between distinct speakers c0 and c1 is > 0.60 (would fail old 0.58!)
+    m0 = c0.mean(axis=0); m0 /= np.linalg.norm(m0)
+    m1 = c1.mean(axis=0); m1 /= np.linalg.norm(m1)
+    assert float(m0 @ m1) > 0.60
+
+    merged, count = pipeline.merge_similar_clusters(E, labels)
+
+    assert count == 3
+    assert merged[0] != merged[30]
+    assert merged[0] != merged[60]
+    assert merged[30] != merged[60]
+    assert merged[60] == merged[80]
+
+
+def test_spectral_cluster_recovers_single_speaker_from_isotropic_cloud():
+    rng = np.random.RandomState(11)
+    dim = 64
+    base = np.zeros(dim, dtype=np.float32)
+    base[0] = 1.0
+    E = _unit_rows(base + 0.08 * rng.randn(60, dim).astype(np.float32))
+
+    labels, count, _ = pipeline.spectral_cluster(E)
+
+    assert count == 1
+    assert set(labels.tolist()) == {0}
+
+
+def test_reconstruct_global_activity_aligns_permuted_overlapping_windows():
+    """Two overlapping 10s windows with SWAPPED local speaker indices must align cleanly."""
+    fr = pipeline.SEG_FRAMES
+    half = fr // 2
+    # Window 0 [0..10s]: first half local spk 0 (Alice), second half local spk 1 (Bob)
+    p0 = np.zeros((fr, 7), dtype=np.float32)
+    p0[:half, 1] = 1.0  # class 1 = local spk 0
+    p0[half:, 2] = 1.0  # class 2 = local spk 1
+    # Window 1 [5..15s]: SWAPPED indices! first half local spk 1 (Bob -> wait: class 1 = Bob!), second half local spk 0 (Alice -> class 2)
+    p1 = np.zeros((fr, 7), dtype=np.float32)
+    p1[:half, 1] = 1.0  # local spk 0 is NOW Bob!
+    p1[half:, 2] = 1.0  # local spk 1 is NOW Alice!
+
+    alice = np.asarray([1.0, 0.0, 0.0], dtype=np.float32)
+    bob = np.asarray([0.0, 1.0, 0.0], dtype=np.float32)
+    bal_mean = 0.5 * (alice + bob)
+    bal_cents = _unit_rows(np.stack([alice - bal_mean, bob - bal_mean]))
+
+    win_embs = np.zeros((2, 3, 3), dtype=np.float32)
+    win_embs[0, 0] = alice
+    win_embs[0, 1] = bob
+    win_embs[1, 0] = bob    # swapped in window 1!
+    win_embs[1, 1] = alice  # swapped in window 1!
+
+    pw = {
+        "win_starts_s": np.asarray([0.0, 5.0], dtype=np.float32),
+        "win_valid_frames": np.asarray([fr, fr], dtype=np.int32),
+        "win_probs": np.stack([p0, p1], axis=0),
+        "win_embs": win_embs,
+        "win_has_emb": np.asarray([[True, True, False], [True, True, False]], dtype=bool),
+        "win_clean_s": np.asarray([[5.0, 5.0, 0.0], [5.0, 5.0, 0.0]], dtype=np.float32),
+        "win_active_s": np.asarray([[5.0, 5.0, 0.0], [5.0, 5.0, 0.0]], dtype=np.float32),
+        "frame_s": pipeline.SEG_FRAME_S,
+    }
+
+    act, _, _, fs = pipeline.reconstruct_global_activity(pw, 2, bal_cents, bal_mean)
+    # 2.5s -> Alice (global 0); 7.5s (overlap region!) -> Bob (global 1); 12.5s -> Alice (global 0)
+    assert int(np.argmax(act[int(2.5 / fs)])) == 0
+    assert int(np.argmax(act[int(7.5 / fs)])) == 1
+    assert float(act[int(7.5 / fs), 1]) > 0.95
+    assert int(np.argmax(act[int(12.5 / fs)])) == 0
+
+
+def test_activity_turn_segments_extracts_confident_subturn_and_rejects_weak_blip():
+    fs = 0.02  # 50 Hz -> 500 frames = 10s
+    act = np.zeros((500, 2), dtype=np.float32)
+    # 0..3.5s spk 0 strong; 3.5..7.0s spk 1 strong (3.5s >= 2.5s); 7.0..10.0s spk 0 strong
+    act[:175, 0] = 0.95
+    act[175:350, 1] = 0.92
+    act[350:, 0] = 0.95
+
+    turn = {"utt_id": "u1", "start": 0.0, "end": 10.0}
+    _, sub_turns = diarizer._activity_turn_segments(
+        [turn], act, [0], fs, min_subturn_s=2.5, min_segment_s=0.5,
+    )
+    assert len(sub_turns["u1"]) == 1
+    assert sub_turns["u1"][0]["speaker"] == "Speaker_2"
+    assert sub_turns["u1"][0]["end_ms"] - sub_turns["u1"][0]["start_ms"] >= 3000
+
+    # Weak margin (0.52 vs 0.45 = 0.07 < 0.15) must NOT trigger sub_turn
+    weak_act = np.zeros((500, 2), dtype=np.float32)
+    weak_act[:175, 0] = 0.95
+    weak_act[175:350, 0] = 0.45
+    weak_act[175:350, 1] = 0.52
+    weak_act[350:, 0] = 0.95
+    _, weak_subs = diarizer._activity_turn_segments(
+        [turn], weak_act, [0], fs, min_subturn_s=2.5, min_segment_s=0.5,
+    )
+    assert weak_subs == {}
+
+
+def test_short_confident_interjection_is_not_overwritten_by_smoothing():
+    turns = [
+        {"utt_id": "a", "start": 0.0, "end": 8.0},
+        {"utt_id": "b", "start": 8.2, "end": 9.1},   # 0.9s confident interjection!
+        {"utt_id": "c", "start": 9.3, "end": 16.0},
+    ]
+    scores = np.asarray([[0.90, 0.05], [0.08, 0.88], [0.92, 0.04]], dtype=np.float32)
+
+    assert diarizer._smooth_turn_speakers(turns, [0, 1, 0], scores, [0, 1]) == [0, 1, 0]

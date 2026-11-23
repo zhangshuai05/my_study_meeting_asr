@@ -37,11 +37,12 @@ _SUBPATHS: tuple[Path, ...] = (
 )
 
 BASELINE = {
-    # 2026-10-19 上游身份合并与句级迟滞更新：
+    # 2026-11-23 第一性原理说话人分离重构：
     # streaming_asr_engine: VAD 同块结束+开始跨句吞字修复；1000ms 显式生效
-    # offline_diarizer: 长窗主投票、迟滞平滑、超短句邻域继承与句内门控的 LF 规范化指纹。
+    # offline_diarizer: 逐窗 powerset 纯净局部声纹 + 去中心化谱聚类 + 无偏 Fisher 双门控合并
+    #                   + 逐窗匈牙利对齐全局 17ms 活跃度 + 移除盲目短句覆盖。
     "streaming_asr_engine.py": ("5152424c04f4e572", 15831),
-    "offline_diarizer.py": ("fc06cdda7d27cebb", 26247),
+    "offline_diarizer.py": ("3e904c748e942e39", 37429),
 }
 
 

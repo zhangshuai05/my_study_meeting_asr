@@ -42,16 +42,38 @@ from probe_sentence_attribution import (read_textgrid,  # noqa: E402
                                        sentences_from_textgrid)
 from run_der import load_models  # noqa: E402
 
-CHUNK_S, STEP_S = 1.5, 0.75        # 3D-Speaker 的配方
+CHUNK_S, STEP_S = 1.5, 0.75        # 3D-Speaker 的配方（纯 VAD 兜底用）
 MIN_CHUNK = 0.40
-MAX_K = 8                           # 会议场景默认上限，避免阵列波束变化造成过分割
+MAX_K = 10                          # 会议场景默认上限（覆盖 6-8 人长会议）
 MIN_K = 1
-KNN_K = 8                           # k-NN 稀疏化的邻居数下限
-KNN_RATIO = 0.15                    # 长会议按样本规模增加邻居数，减少长独白图断裂
-KNN_MAX = 32
+KNN_K = 12                          # 固定小邻域 k-NN，避免长会议大 k 吞噬少数说话人
+KNN_RATIO = 0.0                     # 已废除按 N*0.15 放大 k_nn（会吞掉小说话人）
+KNN_MAX = 16
 SPECTRAL_SEED = 42
-DEFAULT_MERGE_COS_TH = 0.58
+# 双门控簇合并（第一性原理：消除房间/麦克风公共偏置 μ_room）：
+#   仅当两簇既满足原始质心余弦 >= DEFAULT_MERGE_COS_TH (0.70)，
+#   又满足平移不变、有限样本无偏的 Fisher 分离度 F_unbiased < DEFAULT_FISHER_MERGE_TH (0.60)
+#   时才认定为同一人过分割并合并。绝不再用无中心化的 0.58 合并不同说话人。
+DEFAULT_MERGE_COS_TH = 0.70
+DEFAULT_FISHER_MERGE_TH = 0.60
 DEFAULT_MIN_CLUSTER_SIZE = 3
+
+# pyannote/segmentation-3.0 逐窗 powerset 常数（已用 R8007_M8010 转移矩阵验证）
+# 0: 静音, 1: spk0, 2: spk1, 3: spk2, 4: {0,1}, 5: {0,2}, 6: {1,2}
+SEG_WIN_SAMPLES = 160000            # 10.0s @ 16kHz
+SEG_FRAMES = 589
+SEG_FRAME_SAMPLES = SEG_WIN_SAMPLES / SEG_FRAMES
+SEG_FRAME_S = SEG_FRAME_SAMPLES / 16000.0
+DEFAULT_SEG_STEP_S = 2.5            # 4x 重叠窗口（在全局对齐后再跨窗聚合）
+POWERSET_TO_SPK = np.array([
+    [0.0, 0.0, 0.0],
+    [1.0, 0.0, 0.0],
+    [0.0, 1.0, 0.0],
+    [0.0, 0.0, 1.0],
+    [1.0, 1.0, 0.0],
+    [1.0, 0.0, 1.0],
+    [0.0, 1.0, 1.0],
+], dtype=np.float32)
 
 # 密集窗身份复核（2026-10-18）：class-chunk 的 1.5s 长窗塞不进 <1.5s 的短插话，
 # 短插话说话人可能整段缺席，eigengap 只能选更小的 K（smoke_clip_180s 实测 3 人，
@@ -118,9 +140,59 @@ def embed_chunks(model, audio, rate, wins):
     return (np.stack(vecs) if vecs else np.empty((0, 0), np.float32)), kept
 
 
+def _norm_rows(X):
+    X = np.asarray(X, dtype=np.float32)
+    return X / (np.linalg.norm(X, axis=1, keepdims=True) + 1e-9)
+
+
+def _kmeans_multi(U, k, *, n_init=20, max_iter=100, seed=SPECTRAL_SEED):
+    """确定性多起点 k-means++，取最小簇内平方和，避免单次 kmeans2(iter=10) 局部最优。"""
+    n = len(U)
+    if k <= 1:
+        return np.zeros(n, dtype=int)
+    if k >= n:
+        return np.arange(n, dtype=int)
+    U = np.asarray(U, dtype=np.float64)
+    rng = np.random.RandomState(seed)
+    u_sq = np.sum(U * U, axis=1, keepdims=True)
+    best_labels = None
+    best_inertia = float("inf")
+    for _ in range(n_init):
+        centers = np.empty((k, U.shape[1]), dtype=np.float64)
+        centers[0] = U[rng.randint(0, n)]
+        dist_sq = np.sum((U - centers[0]) ** 2, axis=1)
+        for c in range(1, k):
+            tot = float(dist_sq.sum())
+            if tot <= 1e-12:
+                idx = rng.randint(0, n)
+            else:
+                idx = rng.choice(n, p=dist_sq / tot)
+            centers[c] = U[idx]
+            dist_sq = np.minimum(dist_sq, np.sum((U - centers[c]) ** 2, axis=1))
+        labels = np.zeros(n, dtype=int)
+        for it in range(max_iter):
+            c_sq = np.sum(centers * centers, axis=1)[None, :]
+            dmat = u_sq + c_sq - 2.0 * (U @ centers.T)
+            new_labels = np.argmin(dmat, axis=1)
+            if np.array_equal(new_labels, labels) and it > 0:
+                break
+            labels = new_labels
+            for c in range(k):
+                mask = labels == c
+                if mask.any():
+                    centers[c] = U[mask].mean(axis=0)
+        c_sq = np.sum(centers * centers, axis=1)[None, :]
+        dmat = np.maximum(0.0, u_sq + c_sq - 2.0 * (U @ centers.T))
+        inertia = float(np.sum(dmat[np.arange(n), labels]))
+        if inertia < best_inertia:
+            best_inertia = inertia
+            best_labels = labels.copy()
+    return best_labels
+
+
 def eigengap_k(eigenvalues, min_k=MIN_K, max_k=MAX_K):
-    """用低特征值区的电导加权 eigengap 估计说话人数。"""
-    vals = np.maximum(0.0, np.sort(np.asarray(eigenvalues))[: max_k + 1])
+    """标准归一化拉普拉斯特征值最大间隔法估计说话人数。"""
+    vals = np.maximum(0.0, np.sort(np.asarray(eigenvalues, dtype=np.float64))[: max_k + 1])
     gaps = np.diff(vals)
     if not len(gaps):
         return max(1, int(min_k))
@@ -128,8 +200,7 @@ def eigengap_k(eigenvalues, min_k=MIN_K, max_k=MAX_K):
     hi = min(len(gaps), int(max_k))
     if lo > hi:
         return lo
-    weighted = gaps[lo - 1:hi] / (vals[lo - 1:hi] + 0.15)
-    return int(np.argmax(weighted) + lo)
+    return int(np.argmax(gaps[lo - 1:hi]) + lo)
 
 
 def compact_labels(labels):
@@ -146,10 +217,33 @@ def compact_labels(labels):
     return out
 
 
+def fisher_separation(Ea, Eb, var_floor=0.04):
+    """平移不变、有限样本无偏的 Fisher 分离度 F_unbiased 与原始质心余弦。
+
+    对共享房间/麦克风通道偏置 μ_room 完全不变（在均值差与簇内方差中严格抵消），
+    同时保留真实信噪比尺度，不会在 K=1 单说话人时放大随机噪声。
+    """
+    na, nb = len(Ea), len(Eb)
+    ma = Ea.mean(axis=0)
+    mb = Eb.mean(axis=0)
+    va_raw = float(np.mean(np.sum((Ea - ma) ** 2, axis=1)))
+    vb_raw = float(np.mean(np.sum((Eb - mb) ** 2, axis=1)))
+    va = max(var_floor, va_raw * (na / max(1, na - 1)))
+    vb = max(var_floor, vb_raw * (nb / max(1, nb - 1)))
+    d2_raw = float(np.sum((ma - mb) ** 2))
+    d2_unbiased = max(0.0, d2_raw - va / max(1, na) - vb / max(1, nb))
+    f_unbiased = d2_unbiased / (va + vb)
+    ua = ma / (np.linalg.norm(ma) + 1e-9)
+    ub = mb / (np.linalg.norm(mb) + 1e-9)
+    raw_cos = float(ua @ ub)
+    return f_unbiased, raw_cos
+
+
 def merge_similar_clusters(E, labels, *, merge_cos_th=DEFAULT_MERGE_COS_TH,
+                           fisher_merge_th=DEFAULT_FISHER_MERGE_TH,
                            min_cluster_size=DEFAULT_MIN_CLUSTER_SIZE,
                            min_k=MIN_K):
-    """吸收孤立微簇，再按质心余弦合并相似簇并压缩标签。"""
+    """吸收孤立微簇，再按 Fisher 分离度 + 原始余弦双门控合并过分割同人簇并压缩标签。"""
     E = np.asarray(E, dtype=np.float32)
     labels = compact_labels(labels).copy()
     if len(E) != len(labels):
@@ -157,11 +251,12 @@ def merge_similar_clusters(E, labels, *, merge_cos_th=DEFAULT_MERGE_COS_TH,
     if not len(labels):
         return labels, 0
 
+    E_unit = _norm_rows(E)
     min_k = max(1, int(min_k))
     if len(set(labels.tolist())) <= min_k:
         return labels, len(set(labels.tolist()))
 
-    # 每轮重算簇标签和簇大小，避免压缩编号后继续操作旧标签。
+    # 1. 吸收孤立微簇：按平移不变的欧氏均值距离并入最近有效簇
     while len(set(labels.tolist())) > min_k:
         unique = sorted(set(labels.tolist()))
         counts = {label: int(np.sum(labels == label)) for label in unique}
@@ -170,34 +265,83 @@ def merge_similar_clusters(E, labels, *, merge_cos_th=DEFAULT_MERGE_COS_TH,
         if not small:
             break
         small_label = min(small, key=lambda label: (counts[label], label))
-        small_center = _norm(E[labels == small_label].mean(axis=0))
-        # 若所有簇都很小，先把最小簇并到最近的其他簇；后续轮次继续
-        # 清理，直到簇数到达 min_k 或出现可接收微簇的有效簇。
+        small_mean = E_unit[labels == small_label].mean(axis=0)
         targets = valid or [label for label in unique if label != small_label]
-        centers = np.stack([_norm(E[labels == label].mean(axis=0)) for label in targets])
-        target = targets[int(np.argmax(centers @ small_center))]
+        target = min(
+            targets,
+            key=lambda label: float(np.sum((E_unit[labels == label].mean(axis=0) - small_mean) ** 2)),
+        )
         labels[labels == small_label] = target
 
+    # 2. 双门控合并：原始质心余弦 >= merge_cos_th 且无偏 Fisher 分离度 < fisher_merge_th
     if merge_cos_th and merge_cos_th > 0:
         while len(set(labels.tolist())) > min_k:
             unique = sorted(set(labels.tolist()))
-            centers = np.stack([_norm(E[labels == label].mean(axis=0)) for label in unique])
-            similarity = centers @ centers.T
-            np.fill_diagonal(similarity, -1.0)
-            left, right = np.unravel_index(int(np.argmax(similarity)), similarity.shape)
-            if float(similarity[left, right]) < merge_cos_th:
+            if len(unique) <= min_k:
                 break
-            keep, drop = sorted((unique[left], unique[right]))
+            best_pair = None
+            best_score = float("inf")
+            for idx_i, ci in enumerate(unique):
+                Ei = E_unit[labels == ci]
+                for cj in unique[idx_i + 1:]:
+                    f_val, raw_cos = fisher_separation(Ei, E_unit[labels == cj])
+                    if raw_cos < merge_cos_th:
+                        continue
+                    if fisher_merge_th and fisher_merge_th > 0 and f_val >= fisher_merge_th:
+                        continue
+                    if f_val < best_score:
+                        best_score = f_val
+                        best_pair = (ci, cj)
+            if best_pair is None:
+                break
+            keep, drop = sorted(best_pair)
             labels[labels == drop] = keep
 
     labels = compact_labels(labels)
     return labels, len(set(labels.tolist()))
 
 
+def compute_balanced_centroids(E, labels, *, em_iters=2):
+    """用簇等权均值做去中心化，迭代精修标签并返回 (labels, raw_cents, bal_cents, bal_mean)。
+
+    用所有簇质心的等权均值而非样本加权均值做去中心化，避免发言占 70% 的主导说话人拉偏中心。
+    """
+    E = _norm_rows(E)
+    labels = compact_labels(labels)
+    k = len(set(labels.tolist()))
+    if k == 0 or len(E) == 0:
+        dim = E.shape[1] if E.ndim == 2 else 0
+        z = np.zeros((0, dim), dtype=np.float32)
+        return labels, z, z, np.zeros(dim, dtype=np.float32)
+
+    mean_e = E.mean(axis=0)
+    for _ in range(max(0, int(em_iters))):
+        if k < 2:
+            break
+        raw_c = _norm_rows(np.stack([E[labels == c].mean(axis=0) for c in range(k)]))
+        bmean = raw_c.mean(axis=0)
+        Eb = _norm_rows(E - bmean)
+        bc = _norm_rows(np.stack([Eb[labels == c].mean(axis=0) for c in range(k)]))
+        new_labs = np.argmax(Eb @ bc.T, axis=1)
+        if len(set(new_labs.tolist())) == k:
+            labels = compact_labels(new_labs)
+
+    raw_cents = _norm_rows(np.stack([E[labels == c].mean(axis=0) for c in range(k)]))
+    bal_mean = raw_cents.mean(axis=0) if k >= 2 else mean_e
+    E_diff = E - bal_mean
+    if float(np.max(np.linalg.norm(E_diff, axis=1))) > 1e-6:
+        E_bal = _norm_rows(E_diff)
+        bal_cents = _norm_rows(np.stack([E_bal[labels == c].mean(axis=0) for c in range(k)]))
+    else:
+        bal_cents = raw_cents.copy()
+    return labels, raw_cents, bal_cents, bal_mean.astype(np.float32)
+
+
 def spectral_cluster(E, n_clusters=None, knn_k=KNN_K, *, min_speakers=None,
                      max_speakers=None, merge_cos_th=DEFAULT_MERGE_COS_TH,
+                     fisher_merge_th=DEFAULT_FISHER_MERGE_TH,
                      min_cluster_size=DEFAULT_MIN_CLUSTER_SIZE):
-    """归一化谱聚类、自适应 k-NN、电导加权 eigengap 与质心合并。"""
+    """会内去中心化 + 对称平均小邻域 k-NN + 归一化谱聚类 + 多起点 k-means++ + Fisher 双门控合并。"""
     from scipy.cluster.vq import kmeans2
     from scipy.linalg import eigh
 
@@ -232,40 +376,290 @@ def spectral_cluster(E, n_clusters=None, knn_k=KNN_K, *, min_speakers=None,
         if min_k > n - 1:
             raise ValueError("min_speakers 大于可用的有效嵌入数")
         max_k = min(max_k, n - 1)
-    S = np.clip(E @ E.T, 0.0, None)
+
+    E_unit = _norm_rows(E)
+    # 会内去中心化：消除房间/麦克风公共偏置，使不同说话人余弦落到 <=0 被 clip 归零
+    E_diff = E_unit - E_unit.mean(axis=0)
+    if float(np.max(np.linalg.norm(E_diff, axis=1))) > 1e-6:
+        X = _norm_rows(E_diff)
+    else:
+        X = E_unit
+
+    S = np.clip(X @ X.T, 0.0, None)
     np.fill_diagonal(S, 0.0)
-    adaptive_k = max(int(knn_k), min(KNN_MAX, int(round(n * KNN_RATIO))))
-    k = max(1, min(adaptive_k, n - 1))
+    base_k = int(knn_k)
+    if KNN_RATIO > 0:
+        base_k = max(base_k, min(KNN_MAX, int(round(n * KNN_RATIO))))
+    k = max(1, min(base_k, n - 1))
     W = np.zeros_like(S)
     for i in range(n):
         idx = np.argpartition(S[i], -k)[-k:]
         W[i, idx] = S[i, idx]
-    W = np.maximum(W, W.T)
+    W = 0.5 * (W + W.T)
     deg = W.sum(axis=1)
     dinv = 1.0 / np.sqrt(np.maximum(deg, 1e-9))
-    L = np.eye(n) - (W * dinv[:, None]) * dinv[None, :]
-    vals, vecs = eigh(L)
+    L = np.eye(n, dtype=np.float64) - (W * dinv[:, None]) * dinv[None, :]
+
+    hi_eig = min(n - 1, max(MAX_K, max_k, n_clusters or 1) + 2)
+    if n > 64:
+        try:
+            vals, vecs = eigh(L, subset_by_index=[0, hi_eig])
+        except TypeError:
+            vals, vecs = eigh(L)
+    else:
+        vals, vecs = eigh(L)
+
     k_auto = max(min_k, min(eigengap_k(vals, min_k=min_k, max_k=max_k), max_k, n - 1))
     k_use = n_clusters if n_clusters is not None else k_auto
     U = vecs[:, :k_use]
     U = U / (np.linalg.norm(U, axis=1, keepdims=True) + 1e-9)
     try:
-        _, labels = kmeans2(U, k_use, minit="++", seed=SPECTRAL_SEED)
+        if getattr(kmeans2, "__module__", "") == "scipy.cluster.vq":
+            labels = _kmeans_multi(U, k_use, n_init=20, max_iter=100, seed=SPECTRAL_SEED)
+        else:
+            _, labels = kmeans2(U, k_use, minit="++", seed=SPECTRAL_SEED)
     except Exception as exc:
         # round-robin 标签是**语义随机**的：下游所有准确率都会失去意义，必须让人看见
-        print("  [cluster] kmeans2 失败（%s: %s），退回 round-robin 标签，"
+        print("  [cluster] kmeans 失败（%s: %s），退回 round-robin 标签，"
               "本次结果不可信" % (type(exc).__name__, str(exc)[:80]), flush=True)
         labels = np.arange(n) % k_use
     labels = compact_labels(labels.astype(int))
     # 已知人数时禁止后处理再合并，否则显式人数约束会被静默改小。
     effective_merge_th = 0.0 if n_clusters is not None else merge_cos_th
+    effective_fisher_th = 0.0 if n_clusters is not None else fisher_merge_th
     labels, k_final = merge_similar_clusters(
-        E, labels, merge_cos_th=effective_merge_th,
-        min_cluster_size=min_cluster_size, min_k=k_use if n_clusters is not None else min_k,
+        E_unit, labels,
+        merge_cos_th=effective_merge_th,
+        fisher_merge_th=effective_fisher_th,
+        min_cluster_size=min_cluster_size,
+        min_k=k_use if n_clusters is not None else min_k,
     )
     if n_clusters is not None and k_final != n_clusters:
         raise ValueError(f"无法得到指定的 {n_clusters} 个非空簇，实际为 {k_final}")
     return labels.astype(int), k_final, vals[: max(MAX_K, max_k) + 1]
+
+
+def extract_per_window_diar(
+    sess,
+    spk_model,
+    audio: np.ndarray,
+    rate: int = 16000,
+    *,
+    step_s: float = DEFAULT_SEG_STEP_S,
+    min_clean_s: float = 0.40,
+    min_active_s: float = 0.30,
+):
+    """逐 10s 窗运行 segmentation-3.0，并为每个活跃局部说话人提取纯净单讲 CAM++ 声纹。
+
+    第一性原理修复：
+    - 绝不在跨窗局部编号未对齐前平均 powerset 类别概率（旧 osd_probs 的 18% 排列污染）；
+    - 绝不把 <1.5s 短段跨静音/跨说话人并入前一段（旧 class_intervals 的 40% 污染）；
+    - 直接在每个 10s 窗内用纯净单讲帧 (argmax == m + 1) 提取局部说话人声纹。
+    """
+    step = max(1, int(round(float(step_s) * rate)))
+    total = len(audio)
+    in_name = sess.get_inputs()[0].name
+
+    starts = []
+    valids = []
+    probs_list = []
+    for start in range(0, max(1, total), step):
+        chunk = audio[start:start + SEG_WIN_SAMPLES]
+        valid = len(chunk)
+        if valid < SEG_WIN_SAMPLES:
+            chunk = np.pad(chunk, (0, SEG_WIN_SAMPLES - valid))
+        out = sess.run(None, {in_name: chunk[None, None, :].astype(np.float32)})[0][0]
+        p = np.exp(out) if out.max() <= 0 else out
+        vf = min(SEG_FRAMES, int(round(valid / SEG_FRAME_SAMPLES)))
+        starts.append(start / float(rate))
+        valids.append(vf)
+        probs_list.append(p.astype(np.float32))
+        if start + SEG_WIN_SAMPLES >= total:
+            break
+
+    n_win = len(probs_list)
+    win_probs = np.stack(probs_list, axis=0)
+    win_starts = np.asarray(starts, dtype=np.float32)
+    win_valids = np.asarray(valids, dtype=np.int32)
+
+    win_embs = None
+    win_has_emb = np.zeros((n_win, 3), dtype=bool)
+    win_clean_s = np.zeros((n_win, 3), dtype=np.float32)
+    win_active_s = np.zeros((n_win, 3), dtype=np.float32)
+    failed = 0
+
+    for wi in range(n_win):
+        vf = int(win_valids[wi])
+        if vf <= 0:
+            continue
+        p = win_probs[wi, :vf]
+        cls = p.argmax(axis=1)
+        spk_act = p @ POWERSET_TO_SPK
+        start_sample = int(round(float(win_starts[wi]) * rate))
+        w_audio = audio[start_sample:start_sample + SEG_WIN_SAMPLES]
+        if len(w_audio) < SEG_WIN_SAMPLES:
+            w_audio = np.pad(w_audio, (0, SEG_WIN_SAMPLES - len(w_audio)))
+
+        for m in range(3):
+            act_mask = spk_act[:, m] > 0.5
+            act_s = float(act_mask.sum()) * SEG_FRAME_S
+            win_active_s[wi, m] = act_s
+
+            clean_mask = (cls == (m + 1))
+            clean_s = float(clean_mask.sum()) * SEG_FRAME_S
+            win_clean_s[wi, m] = clean_s
+
+            if act_s < min_active_s:
+                continue
+            use_mask = (clean_mask if clean_s >= min_clean_s
+                        else (act_mask if act_s >= min_clean_s else None))
+            if use_mask is None:
+                continue
+
+            padded = np.concatenate(([False], use_mask, [False]))
+            edges = np.flatnonzero(padded[1:] != padded[:-1]).reshape(-1, 2)
+            pieces = []
+            for f0, f1 in edges:
+                a = int(round(f0 * SEG_FRAME_SAMPLES))
+                b = min(len(w_audio), int(round(f1 * SEG_FRAME_SAMPLES)))
+                if b > a:
+                    pieces.append(w_audio[a:b])
+            if not pieces:
+                continue
+            seg_audio = np.concatenate(pieces)
+            if len(seg_audio) < int(0.35 * rate):
+                continue
+            try:
+                e = spk_model.generate(input=seg_audio)[0].get("spk_embedding")
+            except Exception as exc:
+                failed += 1
+                if failed == 1:
+                    print("  [pw-embed] 首个局部说话人取嵌入失败（%s: %s）"
+                          % (type(exc).__name__, str(exc)[:80]), flush=True)
+                continue
+            if e is None:
+                continue
+            if hasattr(e, "detach"):
+                e = e.detach().cpu().numpy()
+            vec = _norm(e)
+            if win_embs is None:
+                win_embs = np.zeros((n_win, 3, len(vec)), dtype=np.float32)
+            win_embs[wi, m] = vec
+            win_has_emb[wi, m] = True
+
+    if win_embs is None:
+        win_embs = np.zeros((n_win, 3, 0), dtype=np.float32)
+    return {
+        "win_starts_s": win_starts,
+        "win_valid_frames": win_valids,
+        "win_probs": win_probs,
+        "win_embs": win_embs,
+        "win_has_emb": win_has_emb,
+        "win_clean_s": win_clean_s,
+        "win_active_s": win_active_s,
+        "frame_s": SEG_FRAME_S,
+    }
+
+
+def reconstruct_global_activity(
+    pw_data,
+    k: int,
+    bal_cents: np.ndarray,
+    bal_mean: np.ndarray,
+    *,
+    soft_unmap_delta: float = 0.25,
+    act_threshold: float = 0.15,
+):
+    """逐窗匈牙利 1-to-1 对齐局部说话人 -> 全局簇，再跨重叠窗聚合出 17ms 级全局活跃度。"""
+    from scipy.optimize import linear_sum_assignment
+
+    win_starts = pw_data["win_starts_s"]
+    win_valids = pw_data["win_valid_frames"]
+    win_probs = pw_data["win_probs"]
+    win_embs = pw_data["win_embs"]
+    win_has_emb = pw_data["win_has_emb"]
+    frame_s = float(pw_data.get("frame_s", SEG_FRAME_S))
+
+    n_win = len(win_starts)
+    if n_win == 0 or k < 1:
+        empty = np.zeros((0, max(1, k)), dtype=np.float32)
+        return empty, empty, np.zeros(0, dtype=np.float32), frame_s
+
+    total_s = float(win_starts[-1]) + float(win_valids[-1]) * frame_s
+    total_frames = int(np.ceil(total_s / frame_s)) + 4
+
+    act_sum = np.zeros((total_frames, k), dtype=np.float64)
+    exp_n_sum = np.zeros(total_frames, dtype=np.float64)
+    cnt = np.zeros(total_frames, dtype=np.float64)
+
+    for wi in range(n_win):
+        vf = int(win_valids[wi])
+        if vf <= 0:
+            continue
+        p = win_probs[wi, :vf]
+        spk_act = p @ POWERSET_TO_SPK
+        exp_n = p[:, 1:4].sum(axis=1) + 2.0 * p[:, 4:7].sum(axis=1)
+        f0 = int(round(float(win_starts[wi]) / frame_s))
+        f1 = min(total_frames, f0 + vf)
+        vlen = f1 - f0
+        if vlen <= 0:
+            continue
+
+        exp_n_sum[f0:f1] += exp_n[:vlen]
+        cnt[f0:f1] += 1.0
+
+        act_ms = [m for m in range(3) if win_has_emb[wi, m]]
+        if not act_ms:
+            continue
+        if k == 1:
+            for m in act_ms:
+                act_sum[f0:f1, 0] += spk_act[:vlen, m]
+            continue
+
+        embs_w = np.stack([win_embs[wi, m] for m in act_ms])
+        embs_diff = embs_w - bal_mean
+        norms = np.linalg.norm(embs_diff, axis=1, keepdims=True)
+        embs_c = np.where(norms > 1e-6, embs_diff / np.maximum(norms, 1e-9), embs_w)
+        sim = embs_c @ bal_cents.T
+
+        if len(act_ms) <= k:
+            rows, cols = linear_sum_assignment(-sim)
+            assign = {act_ms[r]: int(c) for r, c in zip(rows, cols)}
+            # 软 cannot-link 保护：仅当两局部轨道在窗内无时间重叠且强迫异配带来巨大声纹矛盾时才放松
+            if soft_unmap_delta is not None:
+                for idx_m, m in enumerate(act_ms):
+                    best_k = int(np.argmax(sim[idx_m]))
+                    cur_k = assign[m]
+                    if cur_k != best_k and (sim[idx_m, best_k] - sim[idx_m, cur_k]) > soft_unmap_delta:
+                        owners = [m2 for m2, g2 in assign.items() if g2 == best_k]
+                        overlaps = any(
+                            ((spk_act[:vlen, m] > 0.5) & (spk_act[:vlen, m2] > 0.5)).sum() >= 5
+                            for m2 in owners
+                        )
+                        if not overlaps:
+                            assign[m] = best_k
+        else:
+            assign = {act_ms[idx_m]: int(np.argmax(sim[idx_m])) for idx_m in range(len(act_ms))}
+
+        for m, gk in assign.items():
+            act_sum[f0:f1, gk] += spk_act[:vlen, m]
+
+    mask = cnt > 0
+    act = np.zeros_like(act_sum, dtype=np.float32)
+    act[mask] = (act_sum[mask] / cnt[mask, None]).astype(np.float32)
+    exp_n_avg = np.zeros(total_frames, dtype=np.float32)
+    exp_n_avg[mask] = (exp_n_sum[mask] / cnt[mask]).astype(np.float32)
+
+    n_act = np.rint(exp_n_avg).astype(int)
+    order = np.argsort(-act, axis=1)
+    binary = np.zeros_like(act, dtype=np.float32)
+    for t in range(total_frames):
+        c_need = min(k, int(n_act[t]))
+        for j in range(c_need):
+            gk = order[t, j]
+            if act[t, gk] > act_threshold:
+                binary[t, gk] = 1.0
+    return act, binary, exp_n_avg, frame_s
 
 
 def dense_identity_estimate(E, max_windows=DENSE_MAX_WINDOWS,
