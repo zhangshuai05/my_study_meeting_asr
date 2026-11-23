@@ -43,7 +43,7 @@ def test_accept_final_rejects_empty():
 
 def test_polish_turns_keeps_only_accepted_texts():
     def fake_call(prompt):
-        raw = prompt.rsplit("待校对整段：", 1)[1]
+        raw = prompt.rsplit("待校对整段", 1)[1]
         if "第二段" in raw:
             return json.dumps({"polished": "完全重写到底完全不同的一句话很长很长很长"},
                               ensure_ascii=False)
@@ -96,5 +96,5 @@ def test_polish_turns_reports_progress():
 
     assert seen == [{
         "t": "progress", "stage": "final_polish",
-        "done": 1, "total": 1, "msg": "会后精修中…",
+        "done": 1, "total": 1, "msg": "会后精修中 (1/1)...",
     }]

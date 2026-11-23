@@ -64,7 +64,7 @@ def test_build_turns_merges_same_speaker_and_splits_on_gap_or_speaker():
         "turn_0001", "turn_0002", "turn_0003",
     ]
     assert turns[0]["utterance_ids"] == ["utt_0001", "utt_0002"]
-    assert turns[0]["text"] == "大家，早上好"
+    assert turns[0]["text"] == "大家，早上好。"
     assert turns[0]["start_ms"] == 0
     assert turns[0]["end_ms"] == 4000
     assert turns[0]["spk"] == 0
@@ -139,7 +139,7 @@ def test_build_turns_prefers_polished_text():
     turns = build_turns(utts)
 
     assert len(turns) == 1
-    assert turns[0]["text"] == "你好。再见"
+    assert turns[0]["text"] == "你好。再见。"
 
 
 def test_build_turns_empty_input():
@@ -160,7 +160,7 @@ def test_build_turns_empty_final_text_does_not_fall_back():
 def test_build_turns_missing_final_text_falls_back_to_raw():
     utts = [_utt("utt_0001", 0, 1000, "直播稿", final=None)]
 
-    assert build_turns(utts)[0]["text"] == "直播稿"
+    assert build_turns(utts)[0]["text"] == "直播稿。"
 
 
 def test_build_turns_propagates_corrected_and_bypassed_flags():

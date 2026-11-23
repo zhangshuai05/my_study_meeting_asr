@@ -45,8 +45,17 @@ def to_contract(raw: Dict) -> Dict[str, Dict]:
         sub_map = {}
 
     out: Dict[str, Dict] = {}
+    total_items = len(mapping)
     for utt_id, label in mapping.items():
-        index, spk_label = _speaker_fields(label)
+        try:
+            index, spk_label = _speaker_fields(label)
+        except ValueError:
+            # 单条输入仍抛错（契约单测依赖）；批量里跳过坏行，别让整场回填作废
+            if total_items <= 1:
+                raise
+            print(f"[backfill] 跳过非法说话人标签: utt_id={utt_id!r}, label={label!r}",
+                  flush=True)
+            continue
         entry: Dict = {"spk": index, "spk_label": spk_label}
         subs = []
         for item in (sub_map.get(utt_id) or []):

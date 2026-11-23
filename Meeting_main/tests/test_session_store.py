@@ -88,7 +88,7 @@ def test_session_json_has_turns(tmp_path):
 
     assert len(obj["turns"]) == 1
     assert obj["turns"][0]["utterance_ids"] == ["utt_0001", "utt_0002"]
-    assert obj["turns"][0]["text"] == "大家，早上好"
+    assert obj["turns"][0]["text"] == "大家，早上好。"
     assert obj["turns"][0]["spk_label"] == "speaker_0"
 
 
@@ -116,7 +116,7 @@ def test_turns_polished_is_ignored_when_turn_boundary_changed(tmp_path):
 
     obj = store.build_session_json()
 
-    assert obj["turns"][0]["text"] == "你好", "边界不符必须回退直播稿"
+    assert obj["turns"][0]["text"] == "你好。", "边界不符必须回退直播稿"
 
 
 def test_final_text_overrides_turns_but_keeps_live_fields(tmp_path):
@@ -291,4 +291,4 @@ def test_sub_turn_final_text_uses_sub_utt_id(tmp_path):
     sub = next(u for u in obj["utterances"] if u["utt_id"] == "u1#2")
 
     assert sub["final_text"] == "子段最终稿"
-    assert [t["text"] for t in obj["turns"]][1] == "子段最终稿"
+    assert [t["text"] for t in obj["turns"]][1] == "子段最终稿。"

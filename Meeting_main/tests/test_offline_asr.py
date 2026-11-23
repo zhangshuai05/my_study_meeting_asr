@@ -45,7 +45,7 @@ def test_long_utterance_is_split_and_joined(tmp_path):
     )
 
     assert len(calls) == 3
-    assert out["u1"] == {"text": "字，字，字", "start_ms": 0, "end_ms": 3000}
+    assert out["u1"] == {"text": "字字字", "start_ms": 0, "end_ms": 3000, "grouped_cont": False}
 
 
 def test_abort_stops_without_calls(tmp_path):

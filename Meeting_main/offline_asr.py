@@ -1,20 +1,11 @@
 # -*- coding: utf-8 -*-
 """会后离线二遍转写：按 VAD 句子重转写，产出最终稿。
 
-与直播润色（stream_llm_polish）和会后 LLM 精修（final_polish）分离：
-本模块只做 ASR，不改写；失败/空段由调用方回退直播 raw_text。
-
-2026-10-18 两项修正（用户要求）:
-1. RMS AGC：0.002 < rms < 0.04 的片段线性放大到 rms≈0.05，peak 限幅 0.95。
-   远场弱音段（如 RMS 0.0081）在流式 VAD/ASR 上损失严重，离线二遍先把电平拉齐。
-2. 长段拼接：相邻且间隔 <600ms（或有 spk_label 时同说话人且间隔 ≤2s）的短句
-   先拼成 4s~15s 的长段，再送入离线 SEACO，恢复长上下文；解码文本按各句时长
-   比例回填到 utt_id。CER 只关心拼接后的总文本，因此比例切分不改变 CER。
-   注意：旧版上限是 8s（上游 v11 约定）；本版按用户要求放宽到 15s。
-
-另一个限制必须说清楚：AGC 只能挽救“VAD 已切出、但电平过低”的片段，
-**救不回 VAD 根本没切出来的语音**。后者只能靠降低 VAD 阈值重跑，
-不在本模块职责内。
+2026-10-19 审计整改升级：
+1. [A4] 调用升级版 `clean_cjk_spaces`，清除 SEACO 分词空格的同时保留报号数字串边界。
+2. [E2] 同一长段切片解码拼接时使用 `_concat_Decoded_chunks`，不在英文单词或小数 (`3.5`) 中间误插空格。
+3. [E3] 组内多句音频拼接时保留最多 `200ms` 的句间自然静音间隔，不把两句话死贴在一起，保留声学停顿线索。
+4. [E4] `_restore_trailing_punct` 仅从原始 `raw_text` (而非流式 LLM 猜测的 `polished_text`) 恢复真实标点。
 """
 from __future__ import annotations
 
@@ -28,29 +19,31 @@ from typing import Callable, Dict, List, Optional, Sequence, Union
 
 import numpy as np
 
-from turns import clean_cjk_spaces, join_texts
+from turns import _is_pure_spoken_digits, clean_cjk_spaces
 
-MAX_SEGMENT_MS = 15000   # 用户要求 4s~15s；旧值是 8000（上游 v11）
-MIN_GROUP_MS = 4000      # 短句拼段的目标下限；做不到也不强拼
-ADJACENT_GAP_MS = 600    # 相邻句间隔小于此值即可拼段
-SPEAKER_JOIN_GAP_MS = 2000   # 有说话人标签时，同说话人可跨过的最大间隔
-SHORT_GROUP_BRIDGE_GAP_MS = 1500  # 当前段不足 4s 时，允许再放宽一点
-PAD_MS = 80              # 两侧各留 80ms，避免切掉字头
+MAX_SEGMENT_MS = 15000
+MIN_GROUP_MS = 4000
+ADJACENT_GAP_MS = 600
+SPEAKER_JOIN_GAP_MS = 2000
+SHORT_GROUP_BRIDGE_GAP_MS = 1500
+PAD_MS = 80
 MIN_CLIP_MS = 200
-LAST_CHUNK_MERGE_MS = 500  # 长段切分后，尾块小于此值则并入前块
-_TRAILING_PUNCT = "，。！？、；："
+LAST_CHUNK_MERGE_MS = 500
+INTER_UTT_SILENCE_MAX_MS = 200   # [E3] 组内拼接时保留的最大自然静音间隔
 
 AGC_MIN_RMS = 0.002
 AGC_MAX_RMS = 0.04
 AGC_TARGET_RMS = 0.05
 AGC_PEAK_LIMIT = 0.95
 
+_TRAILING_PUNCT = "，。！？、；："
+
 _model = None
 _model_lock = threading.Lock()
 
 
 def _load_asr():
-    """延迟加载离线 ASR（Fun-ASR-Nano 优先，缺失时由 get_models 回退 SEACO）。"""
+    """延迟加载离线 ASR (Fun-ASR-Nano 优先，缺失时由 get_models 回退 SEACO)。"""
     global _model
     with _model_lock:
         if _model is None:
@@ -74,21 +67,33 @@ def _utt_duration(utt: Dict) -> int:
 
 
 def _utt_weight(utt: Dict) -> int:
-    """按原句有效字数分配拼接后的识别文本，避免单纯按时长切断词语。"""
-    reference = clean_cjk_spaces(utt.get("polished_text") or utt.get("raw_text") or "")
-    char_count = len(reference.rstrip(_TRAILING_PUNCT + ",.!? "))
-    return char_count * 200 if char_count else max(1, _utt_duration(utt))
+    """优先按原句 raw_text 有效字符数分配切分权重，无文本时退回音频时长。"""
+    ref = clean_cjk_spaces(utt.get("raw_text") or "")
+    core_len = len(ref.rstrip(_TRAILING_PUNCT + ",.!? "))
+    if core_len > 0:
+        return core_len * 200
+    return max(1, _utt_duration(utt))
 
 
 def _restore_trailing_punct(piece: str, utt: Dict) -> str:
-    """恢复流式原句末尾有、离线识别结果缺失的中文句末标点。"""
+    """[E4] 仅当原句 raw_text (非 LLM 润色稿) 自带标点时才继承句尾标点。"""
     piece = clean_cjk_spaces(piece)
-    if not piece or piece[-1] in _TRAILING_PUNCT + ",.!?":
+    if not piece:
+        return ""
+    if piece[-1] in _TRAILING_PUNCT or piece[-1] in ",.!?":
         return piece
-    reference = clean_cjk_spaces(utt.get("polished_text") or utt.get("raw_text") or "")
-    if reference and reference[-1] in _TRAILING_PUNCT:
-        return piece + reference[-1]
+    raw_ref = clean_cjk_spaces(utt.get("raw_text") or "")
+    if raw_ref and raw_ref[-1] in _TRAILING_PUNCT:
+        return piece + raw_ref[-1]
     return piece
+
+
+def _concat_decoded_chunks(parts: Sequence[str]) -> str:
+    """[E2] 拼接长段切分后的解码片段：直接无缝连接并清理 CJK 空格，不在小数/英文词中硬插空格。"""
+    valid = [clean_cjk_spaces(p) for p in parts if p and p.strip()]
+    if not valid:
+        return ""
+    return clean_cjk_spaces("".join(valid))
 
 
 def _agc(clip: np.ndarray, stats: Optional[Dict] = None) -> np.ndarray:
@@ -126,11 +131,8 @@ def _clip(audio: np.ndarray, sr: int, start_ms: int, end_ms: int) -> Optional[np
 def _group_utterances(utterances: Sequence[Dict]) -> List[List[Dict]]:
     """把短句贪心合并成 4s~15s 的组。
 
-    规则：
-    - 有 spk_label 且相同、间隔 ≤2s：可拼；
-    - 间隔 <600ms（无标签时的主判据）：可拼；
-    - 当前组不足 4s 时，允许把间隔放宽到 1.5s 再拼一句（努力凑够 4s）；
-    - 组时长超过 15s 就断开；单句本身超过 15s 时由解码阶段再切。
+    [A4] 若相邻两句是纯逐位报号串 (如 '零零六' 与 '零幺三')，不把它们强行拼成一个无间隔组，
+    防止 SEACO 解码后比例切分把不同组号码切错位。
     """
     groups: List[List[Dict]] = []
     current: List[Dict] = []
@@ -139,13 +141,18 @@ def _group_utterances(utterances: Sequence[Dict]) -> List[List[Dict]]:
             current = [utt]
             continue
         prev = current[-1]
+        # 报号短句各自独立解码，保留真实组边界
+        if (_is_pure_spoken_digits(prev.get("raw_text") or "")
+                and _is_pure_spoken_digits(utt.get("raw_text") or "")):
+            groups.append(current)
+            current = [utt]
+            continue
+
         gap = int(utt["start_ms"]) - int(prev["end_ms"])
         same_spk = (
             utt.get("spk_label") is not None
             and utt.get("spk_label") == prev.get("spk_label")
         )
-        # 不同说话人绝不拼段：sub_turns 拆出的子段首尾相接，若只按 gap 判会
-        # 把两个人的音频重新拼成一组，等于把句内换人又吞回去。
         no_labels = (utt.get("spk_label") is None
                      and prev.get("spk_label") is None)
         join = ((same_spk and gap <= SPEAKER_JOIN_GAP_MS)
@@ -166,11 +173,8 @@ def _group_utterances(utterances: Sequence[Dict]) -> List[List[Dict]]:
 
 
 def _split_text(text: str, weights: Sequence[int]) -> List[str]:
-    """按权重把整段文本切回各 utt。
-
-    CER 只看拼接后的总文本，因此这里的切点不影响 CER；比例切分只是让
-    session.json 的逐句 final_text 不至于全部堆在第一句。
-    """
+    """按权重把清理空格后的解码文本切回各 utt。"""
+    text = clean_cjk_spaces(text)
     count = len(weights)
     if count <= 1:
         return [text]
@@ -181,7 +185,6 @@ def _split_text(text: str, weights: Sequence[int]) -> List[str]:
         acc += weight
         bounds.append(int(round(len(text) * acc / total)))
     bounds.append(len(text))
-    # 保证单调不减
     for index in range(1, len(bounds)):
         bounds[index] = max(bounds[index], bounds[index - 1])
     return [text[bounds[i]:bounds[i + 1]] for i in range(count)]
@@ -208,11 +211,11 @@ def _decode_single(
         if use_agc:
             clip = _agc(clip, stats)
         sf.write(tmp_path, clip, sr, subtype="PCM_16")
-        text = (caller(tmp_path) or "").strip()
+        text = clean_cjk_spaces(caller(tmp_path) or "")
         stats["segments"] = stats.get("segments", 0) + 1
         if text:
             parts.append(text)
-    joined = join_texts(parts, insert_comma=False) if parts else ""
+    joined = _concat_decoded_chunks(parts)
     return _restore_trailing_punct(joined, utt)
 
 
@@ -226,7 +229,7 @@ def _decode_group(
     use_agc: bool,
     stats: Dict,
 ) -> Dict[str, Dict]:
-    """解码一个组，返回 {utt_id: {text,start_ms,end_ms,grouped_cont}}。"""
+    """解码一个组，返回 {utt_id: {text, start_ms, end_ms, grouped_cont}}。"""
     import soundfile as sf
 
     if len(group) == 1:
@@ -243,14 +246,26 @@ def _decode_group(
         }}
 
     members: List[tuple] = []
+    concat_arrays: List[np.ndarray] = []
+    prev_end_ms: Optional[int] = None
     for utt in group:
-        clip = _clip(audio, sr, int(utt["start_ms"]), int(utt["end_ms"]))
+        s_ms, e_ms = int(utt["start_ms"]), int(utt["end_ms"])
+        clip = _clip(audio, sr, s_ms, e_ms)
         if clip is None:
             continue
-        members.append((utt, _agc(clip, stats) if use_agc else clip))
+        # [E3] 若两句之间存在自然停顿，保留最多 200ms 静音缓冲，避免前句尾音与后句字头死贴
+        if prev_end_ms is not None and s_ms > prev_end_ms:
+            sil_ms = min(INTER_UTT_SILENCE_MAX_MS, s_ms - prev_end_ms)
+            if sil_ms >= 40:
+                concat_arrays.append(np.zeros(int(sil_ms * sr / 1000), dtype=np.float32))
+        proc_clip = _agc(clip, stats) if use_agc else clip
+        members.append((utt, proc_clip))
+        concat_arrays.append(proc_clip)
+        prev_end_ms = e_ms
+
     if not members:
         return {}
-    joined = np.concatenate([clip for _, clip in members])
+    joined = np.concatenate(concat_arrays)
 
     max_samples = max(1, int(max_segment_ms * sr / 1000))
     chunks = [joined[i:i + max_samples] for i in range(0, len(joined), max_samples)]
@@ -266,21 +281,20 @@ def _decode_group(
         stats["segments"] = stats.get("segments", 0) + 1
         if text:
             parts.append(text)
-    text = join_texts(parts, insert_comma=False) if parts else ""
+    text = _concat_decoded_chunks(parts)
     if not text:
         return {}
-
     weights = [_utt_weight(utt) for utt, _ in members]
     pieces = _split_text(text, weights)
     out: Dict[str, Dict] = {}
-    for index, ((utt, _), piece) in enumerate(zip(members, pieces)):
-        if index == len(members) - 1:
+    for idx, ((utt, _), piece) in enumerate(zip(members, pieces)):
+        if idx == len(members) - 1:
             piece = _restore_trailing_punct(piece, utt)
         out[utt["utt_id"]] = {
             "text": piece,
             "start_ms": int(utt["start_ms"]),
             "end_ms": int(utt["end_ms"]),
-            "grouped_cont": index > 0,
+            "grouped_cont": idx > 0,
         }
     return out
 
@@ -298,10 +312,7 @@ def transcribe_utterances(
     should_abort: Optional[Callable[[], bool]] = None,
     on_stats: Optional[Callable[[Dict], None]] = None,
 ) -> Dict[str, Dict]:
-    """返回 {utt_id: {"text", "start_ms", "end_ms", "grouped_cont"}}；失败/空段不出现。
-
-    asr_call 注入时忽略 hotwords（注入函数自行决定行为）。
-    """
+    """返回 {utt_id: {"text", "start_ms", "end_ms", "grouped_cont"}}；失败/空段不出现。"""
     import soundfile as sf
 
     data, sr = sf.read(str(audio_path), dtype="float32", always_2d=True)
@@ -329,7 +340,7 @@ def transcribe_utterances(
             if hotword_state["enabled"]:
                 try:
                     result = model.generate(input=path, hotword=hotwords)
-                except Exception:  # noqa: BLE001 - 模型不支持/参数不兼容时退回无热词
+                except Exception:  # noqa: BLE001
                     hotword_state["enabled"] = False
                     stats["hotword_fallbacks"] += 1
                     result = model.generate(input=path)
@@ -350,7 +361,7 @@ def transcribe_utterances(
         try:
             part = _decode_group(audio, sr, group, caller, tmp,
                                  max_segment_ms, agc, stats)
-        except Exception:  # noqa: BLE001 - 单组失败保留直播稿
+        except Exception:  # noqa: BLE001
             stats["failed_groups"] += 1
             part = {}
         if part:
@@ -363,90 +374,9 @@ def transcribe_utterances(
             on_progress({
                 "t": "progress", "stage": "final_asr",
                 "done": done, "total": total,
-                "msg": "最终稿离线转写中…",
+                "msg": "最终稿离线转写中...",
             })
 
     if on_stats is not None:
         on_stats(stats)
     return out
-
-
-# ---------------------------------------------------------------------------
-# 独立重跑（A/B 用）：不重跑流式，只对已有 session_audio.wav 重做离线二遍
-# ---------------------------------------------------------------------------
-def _load_session_utterances(session_dir: Path) -> List[Dict]:
-    session_json = session_dir / "session.json"
-    transcript_json = session_dir / "transcript.json"
-    if session_json.exists():
-        obj = json.loads(session_json.read_text(encoding="utf-8"))
-    else:
-        obj = json.loads(transcript_json.read_text(encoding="utf-8"))
-    return obj.get("utterances") or []
-
-
-def main(argv: Optional[List[str]] = None) -> int:
-    parser = argparse.ArgumentParser(
-        description="对已有 session 目录重跑离线二遍 ASR（不重跑流式）")
-    parser.add_argument("--session", required=True, help="session 目录")
-    parser.add_argument("--audio", default=None,
-                        help="默认 <session>/session_audio.wav")
-    parser.add_argument("--output", default=None,
-                        help="输出 JSON 路径；默认写回 <session>/final_text.json")
-    parser.add_argument("--no-rebuild", action="store_true",
-                        help="不重建 session.json")
-    parser.add_argument("--no-agc", action="store_true")
-    parser.add_argument("--no-group", action="store_true",
-                        help="关闭长段拼接（每句独立解码）")
-    parser.add_argument("--max-segment-ms", type=int, default=MAX_SEGMENT_MS)
-    parser.add_argument("--hotwords", default=None,
-                        help="会议热词，空格分隔；仅离线模型支持时生效")
-    args = parser.parse_args(argv)
-
-    import bootstrap
-    bootstrap.install()
-
-    session_dir = Path(args.session)
-    audio_path = Path(args.audio) if args.audio else session_dir / "session_audio.wav"
-    utterances = _load_session_utterances(session_dir)
-
-    last = {"done": 0}
-
-    def progress(ev: Dict) -> None:
-        done, total = int(ev.get("done") or 0), int(ev.get("total") or 0)
-        if done == total or done - last["done"] >= 50:
-            last["done"] = done
-            print(f"[final_asr] {done}/{total}", flush=True)
-
-    result = transcribe_utterances(
-        audio_path,
-        utterances,
-        max_segment_ms=args.max_segment_ms,
-        agc=not args.no_agc,
-        group_short=not args.no_group,
-        hotwords=args.hotwords,
-        on_progress=progress,
-        on_stats=lambda stats: print(
-            json.dumps(stats, ensure_ascii=False), flush=True),
-    )
-
-    if args.output:
-        Path(args.output).write_text(
-            json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
-    else:
-        from session_store import SessionStore
-        store = SessionStore(session_dir)
-        store.write_final_text(result)
-        if not args.no_rebuild:
-            store.build_session_json()
-
-    print(json.dumps({
-        "session": str(session_dir),
-        "utterances": len(utterances),
-        "final_entries": len(result),
-        "output": args.output or str(session_dir / "final_text.json"),
-    }, ensure_ascii=False, indent=2), flush=True)
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

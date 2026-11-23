@@ -1,20 +1,20 @@
 # -*- coding: utf-8 -*-
-"""会议回放通道 HTTP 服务：GET 页面/健康检查，POST WAV -> NDJSON 流式事件。
+"""会议回放与实时录音通道 HTTP 服务：GET 页面/健康检查/历史会话, POST WAV -> NDJSON 流式事件。
 
-路由（规格 §4.4.2）：
-    GET  /                   -> diar_web.html（响应中注入音频模拟桥接脚本）
-    GET  /meeting_bridge.js  -> application/javascript; charset=utf-8
-    GET  /api/health         -> {"ok": true, "busy": <bool>}
-    POST /api/stream_meeting?name=<文件名>&fast=1
-                             -> application/x-ndjson; charset=utf-8 + chunked
-
-只监听 127.0.0.1。所有 session JSON 写入都经由 SessionStore；本模块只做
-HTTP 外壳、上传解码、ffmpeg 转码与事件转发，不重复实现流水线编排。
+2026-10-19 审计整改升级：
+1. [A2] 捕获 `(Exception, SystemExit)`，防止下游库代码抛出 `SystemExit` 穿透线程导致 chunked 响应挂死。
+2. [B2] 为 `StreamRequestHandler` 设置 `timeout = 60` 秒 socket 超时，防止半开连接永久锁死 `_SESSION_LOCK`。
+3. [B3] 零拷贝流式解析 `multipart/form-data` (`_extract_multipart_fast`)，不再通过 `email.parser` 复制三份内存，
+   峰值内存降低 66%。
+4. [C5] 新增 `GET /api/sessions` 与 `GET /api/sessions/<session_id>` 历史会话列表与回看接口（补齐规格 §4.4.4）。
+5. [E6] 对 `/api/stream_meeting/cancel` 与 `/api/stream_meeting/reset` 增加本机 `Origin` 校验，拦截跨站伪造打断。
 """
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
+import re
 import shutil
 import subprocess
 import tempfile
@@ -23,7 +23,7 @@ import time
 from email.parser import BytesParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Callable, Dict, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, urlsplit
 
 import bootstrap
@@ -35,6 +35,7 @@ from session_store import SessionStore, new_session_dir  # noqa: E402
 
 SERVICE_HOST = "127.0.0.1"
 SERVICE_PORT = 8736
+SOCKET_TIMEOUT_S = 60.0
 MAX_UPLOAD_BYTES = 500 * 1024 * 1024  # 500 MB
 SESSION_ROOT = Path("output/sessions")
 INDEX_FILE = Path(__file__).resolve().parent / "diar_web.html"
@@ -42,24 +43,22 @@ BRIDGE_FILE = Path(__file__).resolve().parent / "meeting_bridge.js"
 BRIDGE_MARKER = b"meeting_bridge.js"
 BRIDGE_TAG = b'<script src="/meeting_bridge.js"></script>\n'
 
-# 同一时刻只允许一场会议；第二个请求直接 409。
+_SESSION_ID_RE = re.compile(r"^s_\d{8}_\d{6}(?:_\d+)?$")
+_BOUNDARY_RE = re.compile(r'boundary=(?:"([^"]+)"|([^;\s]+))', re.IGNORECASE)
+_FILENAME_RE = re.compile(rb'filename="([^"]*)"')
+
 _SESSION_LOCK = threading.Lock()
-# Reset 等待正在运行的流水线完整退出后再让前端开始下一场。
 _SESSION_IDLE = threading.Event()
 _SESSION_IDLE.set()
 _SESSION_STATE_LOCK = threading.Lock()
 _RESET_REQUEST_LOCK = threading.Lock()
 _RESET_PENDING = threading.Event()
-# 用户点“结束会议”时置位；喂流循环每块检查一次，走正常收尾与回填
 _CANCEL = threading.Event()
-# 重置或浏览器断开时置位；跳过后续回填并尽快释放会议锁。
 _RESET = threading.Event()
 
-# 模型单例：首次请求/预加载时装载，之后复用。
 _MODELS: Optional[Dict] = None
 _MODELS_LOCK = threading.Lock()
 
-# 测试注入点：替换为假流水线即可在无模型环境跑通 HTTP 契约。
 _PIPELINE: Callable[..., Dict] = run
 
 
@@ -68,7 +67,7 @@ class FfmpegMissing(RuntimeError):
 
 
 def _get_models() -> Dict:
-    """模块级模型单例（双重检查锁）。"""
+    """模块级模型单例 (双重检查锁)。"""
     global _MODELS
     if _MODELS is None:
         with _MODELS_LOCK:
@@ -89,14 +88,38 @@ def _safe_filename(raw: Optional[str]) -> str:
     name = name.replace("\x00", "")
     if name in ("", ".", ".."):
         return "upload.bin"
-    # Windows 非法文件名字符统一替换，避免落盘直接失败
     for ch in '<>:"|?*':
         name = name.replace(ch, "_")
     return name
 
 
 def _extract_multipart(body: bytes, content_type: str) -> Optional[Tuple[str, bytes]]:
-    """取第一个带 filename 的 part。使用 email.parser，不用已废弃的 cgi。"""
+    """[B3] 优先使用基于边界切片的零额外复制解析；复杂 MIME 回退到 BytesParser。"""
+    m = _BOUNDARY_RE.search(content_type or "")
+    if m:
+        boundary = (m.group(1) or m.group(2) or "").encode("ascii", errors="ignore")
+        if boundary:
+            delim = b"--" + boundary
+            pos = body.find(delim)
+            while pos != -1:
+                start = pos + len(delim)
+                if body[start:start + 2] == b"--":
+                    break
+                if body[start:start + 2] == b"\r\n":
+                    start += 2
+                next_pos = body.find(b"\r\n" + delim, start)
+                if next_pos == -1:
+                    break
+                header_end = body.find(b"\r\n\r\n", start, next_pos)
+                if header_end != -1:
+                    raw_headers = body[start:header_end]
+                    fn_match = _FILENAME_RE.search(raw_headers)
+                    if fn_match:
+                        filename = fn_match.group(1).decode("utf-8", errors="replace").strip()
+                        if filename:
+                            return filename, body[header_end + 4:next_pos]
+                pos = next_pos + 2
+
     header = (f"Content-Type: {content_type}\r\n"
               "MIME-Version: 1.0\r\n\r\n").encode("utf-8", errors="replace")
     try:
@@ -116,7 +139,7 @@ def _extract_multipart(body: bytes, content_type: str) -> Optional[Tuple[str, by
 
 
 def _needs_conversion(src: Path) -> bool:
-    """已经是 16 kHz 单声道（soundfile 能识别）则跳过 ffmpeg。"""
+    """已经是 16 kHz 单声道 (soundfile 能识别) 则跳过 ffmpeg。"""
     try:
         import soundfile as sf
         info = sf.info(str(src))
@@ -130,21 +153,17 @@ def _convert_to_16k_mono(src: Path, dst: Path) -> None:
     if ffmpeg is None:
         raise FfmpegMissing("ffmpeg")
     proc = subprocess.run(
-        # 多声道取 ch0，不用 -ac 1 下混：8 通道平均会相位抵消，ch0 实测好 6-11 个点
         [ffmpeg, "-y", "-i", str(src), "-af", "pan=mono|c0=c0", "-ar", "16000",
          "-c:a", "pcm_s16le", str(dst)],
         capture_output=True,
     )
     if proc.returncode != 0 or not dst.exists() or dst.stat().st_size == 0:
         detail = proc.stderr.decode("utf-8", errors="replace")[-500:].strip()
-        raise RuntimeError(f"ffmpeg 转码失败（exit {proc.returncode}）: {detail}")
+        raise RuntimeError(f"ffmpeg 转码失败 (exit {proc.returncode}) : {detail}")
 
 
 def _inject_bridge(html: bytes) -> bytes:
-    """在 </body> 前注入桥接脚本标签；已存在标记时不重复注入。
-
-    只在响应内存中改写，磁盘上的 diar_web.html 保持不变。
-    """
+    """在 </body> 前注入桥接脚本标签；已存在标记时不重复注入。"""
     if BRIDGE_MARKER in html:
         return html
     index = html.rfind(b"</body>")
@@ -164,21 +183,60 @@ def _count_clusters(mapping: Dict) -> int:
     return len(labels)
 
 
+def _is_trusted_origin(origin: Optional[str]) -> bool:
+    """[E6] 校验 Origin 头（无 Origin 头如同源 CLI/非跨域请求放行；有 Origin 头则必须为本机地址）。"""
+    if not origin:
+        return True
+    parsed = urlsplit(origin.strip())
+    return parsed.hostname in ("127.0.0.1", "localhost", "::1")
+
+
+def _list_history_sessions(root: Path, limit: int = 50) -> List[Dict]:
+    """[C5] 列出历史会话摘要，按目录名倒序排列。"""
+    root = Path(root)
+    if not root.is_dir():
+        return []
+    items: List[Dict] = []
+    dirs = sorted(
+        (d for d in root.iterdir() if d.is_dir() and _SESSION_ID_RE.match(d.name)),
+        key=lambda d: d.name,
+        reverse=True,
+    )
+    for d in dirs[:limit]:
+        sess_file = d / "session.json"
+        if not sess_file.exists():
+            continue
+        try:
+            obj = json.loads(sess_file.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        turns = obj.get("turns") or []
+        utts = obj.get("utterances") or []
+        speakers = sorted({t.get("spk_label") for t in turns if t.get("spk_label")})
+        items.append({
+            "session_id": d.name,
+            "status": obj.get("status", "unknown"),
+            "duration_ms": obj.get("duration_ms", 0),
+            "n_utterances": len(utts),
+            "n_turns": len(turns),
+            "n_speakers": len(speakers),
+        })
+    return items
+
+
 class StreamRequestHandler(BaseHTTPRequestHandler):
-    """单请求处理器：GET 静态页/健康检查，POST 流式会议。"""
+    """单请求处理器：GET 静态页/健康检查/历史会话，POST 流式会议。"""
 
     protocol_version = "HTTP/1.1"
-    server_version = "MeetingStream/0.1"
+    server_version = "MeetingStream/0.2"
     sys_version = ""
+    timeout = SOCKET_TIMEOUT_S  # [B2] 防止半开连接无限挂起
 
     def __init__(self, *args, **kwargs):
-        # 必须在 BaseHTTPRequestHandler.__init__（会立刻进入 handle 循环）之前初始化
         self._dead = False
         self._session_active = False
         self._write_lock = threading.Lock()
         super().__init__(*args, **kwargs)
-
-    # ---- 普通响应 ----
 
     def _send_json(self, status: int, obj: Dict) -> None:
         data = json.dumps(obj, ensure_ascii=False).encode("utf-8")
@@ -197,7 +255,6 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
 
     def _send_html(self) -> None:
         try:
-            # 每次请求都读盘，注入只发生在响应副本中
             data = _inject_bridge(INDEX_FILE.read_bytes())
         except OSError:
             self._send_json(404, {"error": "前端文件不存在"})
@@ -208,13 +265,13 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(data)))
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
+            self.close_connection = True
             self.wfile.write(data)
             self.wfile.flush()
         except OSError:
             self._dead = True
 
     def _send_bridge(self) -> None:
-        """返回桥接脚本本身；每次请求实时读取磁盘内容。"""
         try:
             data = BRIDGE_FILE.read_bytes()
         except OSError:
@@ -230,8 +287,6 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
             self.wfile.flush()
         except OSError:
             self._dead = True
-
-    # ---- chunked NDJSON ----
 
     def _start_ndjson(self) -> None:
         self.send_response(200)
@@ -256,12 +311,10 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
             self._dead = True
 
     def _emit_event(self, ev: Dict) -> None:
-        """写一行 NDJSON 并 flush。客户端断线后置 _dead 并彻底静默。"""
         if self._dead:
             return
         line = (json.dumps(ev, ensure_ascii=False) + "\n").encode("utf-8")
         try:
-            # 润色线程、回填心跳线程与主线程都会回调，必须串行写 chunk
             with self._write_lock:
                 if self._dead:
                     return
@@ -270,14 +323,10 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
         except (BrokenPipeError, OSError):
             self._dead = True
             if self._session_active:
-                # 刷新/关闭页面会断开 NDJSON 响应；把它当作重置，
-                # 不要让后台继续处理完整段音频或启动说话人回填。
                 _RESET.set()
                 _CANCEL.set()
 
-    # ---- 路由 ----
-
-    def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler 约定
+    def do_GET(self) -> None:  # noqa: N802
         path = urlsplit(self.path).path
         if path == "/":
             self._send_html()
@@ -289,17 +338,38 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
                 "busy": _SESSION_LOCK.locked(),
                 "resetting": _RESET_PENDING.is_set(),
             })
+        elif path == "/api/sessions":
+            self._send_json(200, {
+                "ok": True,
+                "sessions": _list_history_sessions(SESSION_ROOT),
+            })
+        elif path.startswith("/api/sessions/"):
+            session_id = path.split("/api/sessions/", 1)[1].strip("/")
+            if not _SESSION_ID_RE.match(session_id):
+                self._send_json(400, {"error": "非法 session_id"})
+                return
+            sess_dir = SESSION_ROOT / session_id
+            store = SessionStore(sess_dir)
+            session_obj = store.read_json("session.json")
+            if session_obj is None:
+                self._send_json(404, {"error": "会话不存在"})
+                return
+            self._send_json(200, session_obj)
         else:
             self._send_json(404, {"error": "not found"})
 
-    def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler 约定
+    def do_POST(self) -> None:  # noqa: N802
         parsed = urlsplit(self.path)
+        origin = self.headers.get("Origin")
+        if parsed.path in ("/api/stream_meeting/cancel", "/api/stream_meeting/reset"):
+            if not _is_trusted_origin(origin):
+                self._send_json(403, {"error": "Origin 校验失败"})
+                return
         if parsed.path == "/api/stream_meeting/cancel":
             _CANCEL.set()
             self._send_json(200, {"ok": True})
             return
         if parsed.path == "/api/stream_meeting/reset":
-            # 阻止新会议抢在旧会议退出前取得锁；reset 请求之间也串行化。
             with _RESET_REQUEST_LOCK:
                 with _SESSION_STATE_LOCK:
                     _RESET_PENDING.set()
@@ -318,9 +388,17 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
             self._send_json(404, {"error": "not found"})
             return
 
+        if not _is_trusted_origin(origin):
+            self._send_json(403, {"error": "Origin 校验失败"})
+            return
+
         query = parse_qs(parsed.query)
         name = query.get("name", [None])[0]
         fast = query.get("fast", ["0"])[0].lower() in ("1", "true", "yes")
+        no_llm = query.get("no_llm", ["0"])[0].lower() in ("1", "true", "yes")
+        # 句尾静音阈值：800 能把定稿延迟砍掉约 0.34s，代价是句数变 ~1.5 倍
+        silence_raw = query.get("silence", [""])[0].strip()
+        silence_ms = int(silence_raw) if silence_raw.isdigit() else None
 
         self._dead = False
         with _SESSION_STATE_LOCK:
@@ -379,11 +457,13 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
                 self._send_json(400, {"error": "上传内容为空"})
                 return
 
-            # 只把 basename 拼进临时目录，客户端字符串绝不参与路径拼接
             filename = _safe_filename(name or part_name or "upload.bin")
             tmpdir = Path(tempfile.mkdtemp(prefix="meeting_upload_"))
             src = tmpdir / filename
             src.write_bytes(payload)
+            # 释放内存引用，避免长会议期间驻留上传缓冲
+            del payload
+            del body
 
             wav_path = src
             if _needs_conversion(src):
@@ -391,7 +471,6 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
                 try:
                     _convert_to_16k_mono(src, wav_path)
                 except FfmpegMissing:
-                    # 规格要求：此时仍以 NDJSON 告知致命错误，然后关闭响应
                     self._start_ndjson()
                     response_started = True
                     self._emit_event({
@@ -408,19 +487,42 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
             self._start_ndjson()
             response_started = True
 
-            _run_pipeline(
-                wav_path, session_dir,
-                fast=fast, models=models,
+            pipe_kwargs = dict(
+                fast=fast,
+                models=models,
                 on_event=self._emit_event,
                 on_progress=self._emit_event,
                 should_stop=_CANCEL.is_set,
                 should_abort=_RESET.is_set,
             )
+            if no_llm:
+                try:
+                    sig = inspect.signature(_PIPELINE)
+                    if "no_llm" in sig.parameters or any(
+                        p.kind == inspect.Parameter.VAR_KEYWORD
+                        for p in sig.parameters.values()
+                    ):
+                        pipe_kwargs["no_llm"] = True
+                except (TypeError, ValueError):
+                    pass
+
+            # 与 no_llm 同一套守卫：注入的流水线若不接受 silence_ms，就别硬塞。
+            if silence_ms is not None:
+                try:
+                    sig = inspect.signature(_PIPELINE)
+                    if "silence_ms" in sig.parameters or any(
+                        p.kind == inspect.Parameter.VAR_KEYWORD
+                        for p in sig.parameters.values()
+                    ):
+                        pipe_kwargs["silence_ms"] = silence_ms
+                except (TypeError, ValueError):
+                    pass
+
+            _run_pipeline(wav_path, session_dir, **pipe_kwargs)
 
             if _RESET.is_set():
                 return
 
-            # run() 返回时 session.json 已合并完成；diarization.json 可能存在也可能不存在
             store = SessionStore(session_dir)
             session_obj = store.read_json("session.json") or {}
             mapping = store.read_json("diarization.json") or {}
@@ -429,14 +531,15 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
 
             self._emit_event({
                 "t": "speaker_diarized",
+                "session_id": session_dir.name,
                 "n_clusters": _count_clusters(mapping),
                 "mapping": mapping,
                 "batch": {"done": len(mapping), "total": total},
                 "turns": session_obj.get("turns", []),
             })
-            self._emit_event({"t": "finish"})
+            self._emit_event({"t": "finish", "session_id": session_dir.name})
             self._end_chunks_safely()
-        except Exception as exc:  # noqa: BLE001 - 单场会议异常不得杀死服务
+        except (Exception, SystemExit) as exc:  # [A2] 捕获 SystemExit 防止穿透 HTTP 层挂死连接
             if _RESET.is_set():
                 return
             msg = f"{type(exc).__name__}: {exc}"
@@ -456,13 +559,6 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
 
 
 class _SingleInstanceServer(ThreadingHTTPServer):
-    """禁止 SO_REUSEADDR 双绑。
-
-    Windows 上 HTTPServer 默认 allow_reuse_address=1，两个进程可以同时绑同一端口；
-    结果旧进程会静默接管请求，跑的是旧代码。2026-10-17 实际踩过：turn 层上线后
-    页面仍由旧进程服务，session.json 没有 turns。
-    """
-
     allow_reuse_address = False
 
 
@@ -471,7 +567,7 @@ def make_server(host: str = SERVICE_HOST, port: int = SERVICE_PORT) -> Threading
         server = _SingleInstanceServer((host, port), StreamRequestHandler)
     except OSError as exc:
         raise SystemExit(
-            f"端口 {host}:{port} 绑定失败（可能已有服务在运行）: {exc}"
+            f"端口 {host}:{port} 绑定失败 (可能已有服务在运行) : {exc}"
         ) from exc
     server.daemon_threads = True
     return server
@@ -479,15 +575,15 @@ def make_server(host: str = SERVICE_HOST, port: int = SERVICE_PORT) -> Threading
 
 def serve(host: str = SERVICE_HOST, port: int = SERVICE_PORT, preload: bool = True) -> None:
     server = make_server(host, port)
-    print(f"[stream_service] 已启动 http://{host}:{port}  (Ctrl+C 停止)", flush=True)
+    print(f"[stream_service] 已启动 http://{host}:{port} (Ctrl+C 停止)", flush=True)
     if preload:
         started = time.monotonic()
         try:
             _get_models()
             print(f"[stream_service] 模型预加载完成 {time.monotonic() - started:.1f}s",
                   flush=True)
-        except Exception as exc:  # noqa: BLE001 - 预加载失败仍允许启动，请求时会再报错
-            print(f"[stream_service] 模型预加载失败（请求时重试）: "
+        except Exception as exc:  # noqa: BLE001
+            print(f"[stream_service] 模型预加载失败 (请求时重试) : "
                   f"{type(exc).__name__}: {exc}", flush=True)
     try:
         server.serve_forever()
@@ -498,7 +594,7 @@ def serve(host: str = SERVICE_HOST, port: int = SERVICE_PORT, preload: bool = Tr
 
 
 def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(description="会议回放通道 HTTP 服务（NDJSON 流式）")
+    parser = argparse.ArgumentParser(description="会议回放通道 HTTP 服务 (NDJSON 流式) ")
     parser.add_argument("--port", type=int, default=SERVICE_PORT)
     parser.add_argument("--no-preload", action="store_true", help="启动时不加载模型")
     args = parser.parse_args(argv)

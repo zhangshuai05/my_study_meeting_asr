@@ -1,214 +1,251 @@
-# diarization_cl
+# 长会议说话人分离 · Diarization
 
-单 mic 长会议系统的**说话人分离 + 说话人识别**（会议内匿名说话人归属，不是声纹库实名识别）。
-目标场景：安静、轮流发言、36–40 分钟长音频。
+把一段 36–40 分钟的会议录音，切成「**谁 · 在哪一秒 · 说了什么**」的时间轴。
 
-本仓库同时承载**代码主线**与**历史里程碑归档**（见文末「里程碑归档」）。
+单声道、纯 CPU、全本地运行，音频不出机器。
+
+`Python 3.12` · `CPU only` · `离线` · `Windows / Linux`
+
+> 本仓库是**说话人分离引擎**（回答"这句是谁说的"）。
+> 实时转写、LLM 纠错与会议前端的完整链路在配套仓库，见 [配套系统](#配套系统)。
 
 ---
 
-## 快速上手
+## 它解决什么问题
 
-```bash
-pip install -r requirements.txt
+一场 40 分钟的会议录音，转写成文字之后仍然没法用——你不知道每句话是谁说的。
+要交付一份会议纪要，需要的是这样的东西：
 
-# 1) 数据与模型不在仓库内，先准备（见「外部依赖」）
-
-# 2) 零推理先验口径（只读缓存，几十秒）
-python -u -B scripts/evaluation/probe_fullref_truncation.py --skip-v12
-
-# 3) 测试（必须在 streaming_asr/ 里跑：那里有 pytest.ini 设 testpaths/pythonpath；
-#    在仓库根跑会把 milestones/ 下的同名测试一起收集，报 import file mismatch）
-cd streaming_asr && python -B -m pytest -q     # 154 passed
+```
+00:01:35  speaker_2   这个季度的成本我们压了 8 个点
+00:01:41  speaker_0   压在哪
+00:01:43  speaker_2   主要是物流和仓储
 ```
 
-> **测试数口径**：`154 passed` 是 2026-09-29 交接文档记录的基准数。本会话在 DSH 沙箱内
-> 复跑实测为 **148 passed + 6 errors**，6 个 error 全部是 `tmp_path` 夹具 setup 阶段的
-> `PermissionError`（沙箱拒绝写 `%LOCALAPPDATA%\Temp\pytest-of-EDY` 与 `.pytest-tmp*`），
-> 与代码无关；在普通终端下应恢复到 154 passed。**若你复跑得到的不是 154，先查这一点。**
+这件事的难点不在"识别声音"，在于：
 
-**入口链**：生产分离入口是 `streaming_asr/claude_a2_v12.py` 的 `diarize()`，它内部调用
-`claude_a2_v11.py` 的聚类组件。长窗（2.0s）定身份、短窗（0.6s）只找换人边界。
+- **没有人告诉你有几个说话人**，得自己估；
+- **轮次极碎**，大量发言不到 5 秒，切点偏一点就整句判错；
+- **长音频会累积误差**，40 分钟跑下来聚类中心会漂。
 
----
-
-## 当前状态（2026-09-29）
-
-### 版本分工
-
-| 版本 | 角色 |
-|---|---|
-| v7–v10 | 早期测试台、ASR 与双人基线 |
-| v11 | 多人聚类实验泳道：候选 K 生成、聚类、候选筛选 |
-| **v12** | **当前生产分离流程**：2.0s 长窗定身份 + 0.6s 短窗细化边界 |
-| v13 | **评估阶段**（评估工具、证据链、bug 修复），**不是**已冻结的新算法 |
-
-`v12` 是生产入口，`v11` 提供聚类组件。**K 选择不是独立的 v13 算法**——v13 回答的是
-"生产路径与探针口径是否一致""修复的代价是多少""A/B 规则是否真的改善了真实路径"。
-
-### 已确认
-
-- **K 上限静默截断 bug 已修复**（`977fc6b`）。根因：`_candidate_clusters(E, max_speakers=MAX_SPEAKERS)`
-  的默认值在 **`def` 执行时**就绑成 4，`_v11_window_params` 改模块变量**改不动它**，
-  于是候选恒为 k=1..4 而意图是 1..10。修法是 `diarize` 两处调用点显式传参，`v11` 零改动。
-- **修复代价已量化**：12 场里 **1 场改善 / 11 场无变化**。`S_R004S01C01` 的 k 由 4→5，
-  按句主指标 78.7% → **90.7%（+12.0 pts）**，其余 11 场 k、段表、归属率逐位相同。
-- **测试 154 passed**，工作区证据链可复算。
-
-### 仍是待验证假设（**不许当结论引用**）
-
-- **"K 应等于真值人数"** —— 未证明。K 可能同时承担"说话人身份数量"与"时间边界锚点数量"
-  两个角色；本仓库只用 RTTM 人数说明"base 偏低"，**不主张** base k 应等于真值人数。
-- **"份额门 `MIN_CLUSTER_SHARE` 是欠分割根因"** —— 只是**候选准入层面**的观察。
-  改这道门能否修好欠分割未验证；且过分割代价与簇纯度都未度量。
-- **A/B 选 K 规则的作用** —— 在 dev 12 场、当前探针口径内，A 表现为**条件性兜底**：
-  base k≤3 的 9 场中 7 提升 / 2 持平 / 0 下降；base k≥4 的 3 场全部下降。
-  这**不能推出** A 是普适 K 判据，也**不能**当作方法收益。A **未进入生产**。
-- **rescue 分支** —— "替换逻辑的**控制流**"已由合成回归覆盖（`test_rescue_replacement.py`）；
-  **真实会议上的替换仍未验证**（dev 12 场无一场真的替换过）。**不得**写成"救援机制已端到端验证"。
-
-### 不得引用的表述
-
-| 不要引用 | 原因 |
-|---|---|
-| "12/12 行为保持" = 修复无代价 | **同义反复**。探针 base 修正后与生产同源，本来就该一致 |
-| "9/9"、"一律变好" | 实为 7 提升 + 2 持平 |
-| "base 已分对" | `k≥4` 只说明"分得较多"，未对真值验证 |
-| `L_K_all` 是当前系统可获得的收益 | 那是**全候选强制 oracle 上界**，越过合格门限 |
-| `touched_cap=true` 代表选择器收敛到 cap | 只说明候选**生成**到了 cap=10 |
+本仓库解决的就是这三件事。
 
 ---
 
-## 文档入口（按可靠性排序）
+## 效果
+
+```
+输入   40 分钟会议录音（16 kHz 单声道）· 6 人 · 远场
+输出   带 speaker 标签与时间戳的句子序列（可直接对齐 ASR 文本）
+```
+
+| 指标 | 数值 | 口径（重要） |
+|---|---|---|
+| 句级归属率 | **61.01%** | AliMeeting 8 场句级均值，人工标注句边界 |
+| 句级归属率（VAD 口径） | 89.42% | 按 VAD 切出的句子算，**不可与上一行混用** |
+| 可判句归属率 | 96.2% | AISHELL-4 39 分钟 · 6 人，人数估计精确命中 |
+
+> ⚠️ 上表三行**是三把不同的尺子**，不能互相换算：
+> 61.01% 按人工标注的句子算，89.42% 按 VAD 切出的句子算（差约 28 个点）；
+> 96.2% 是"能判定归属的句子里判对的比例"，分母更小。
+> 另有一层：DER 还分"参考是否截断到分析窗口"两条口径，两者差 69 个点——
+> 那是帧级的第四把尺子，与上面三行无关，引用时一并标明。
+
+---
+
+## 核心特性
+
+- **两级时间窗**：2.0 秒长窗定身份，0.6 秒短窗只找"换人边界"。长窗保证声纹纯度，
+  短窗保证边界精度，两者分开跑。
+- **自动人数**：k-NN 稀疏化 + eigengap 估计 K，不需要事先告诉它有几个人。
+- **句级输出**：与 ASR 的句子边界直接对齐，不是纯帧级的 `[start, end, spk]` 三元组。
+- **可解释的诊断台**：网页上并排多条泳道，拧参数秒级出结果，同时看到真值对照与
+  句级四类分解（对 / 弃权 / 未映射 / 错答）。
+- **全离线 CPU**：VAD、声纹、聚类都在本机跑完，不需要 GPU、不调用云服务。
+- **评测闭环内置**：帧级 DER 与句级归属率两套评分器都在仓库里，改完能立刻验。
+
+---
+
+## 架构
+
+```
+                16 kHz 单声道 WAV
+                        │
+                        ▼
+            ┌───────────────────────┐
+            │  FSMN-VAD             │  切出语音区间（本地调过阈值的副本）
+            └───────────┬───────────┘
+                        ▼
+            ┌───────────────────────┐
+            │  CAM++ 声纹嵌入        │  192 维，按 2.0s / 0.6s 两种窗提取
+            └───────────┬───────────┘
+                        ▼
+   ┌────────────────────────────────────────────┐
+   │  聚类（v11 组件）                            │
+   │  k-NN 稀疏化 → eigengap 自动定 K → 质心      │
+   └────────────────────┬───────────────────────┘
+                        ▼
+            ┌───────────────────────┐
+            │  短窗对照质心找换人边界 │  余弦边距 + 迟滞平滑 + 碎段吸收
+            └───────────┬───────────┘
+                        ▼
+        speaker_0 / speaker_1 / … + 时间戳
+```
+
+入口链：`streaming_asr/claude_a2_v12.py` 的 `diarize()` 是生产入口，
+内部调用 `claude_a2_v11.py` 的聚类组件。
+
+---
+
+## 快速开始
+
+### 1. 环境
+
+```bash
+pip install -r requirements.txt          # numpy / scipy / soundfile / funasr / torch / modelscope
+```
+
+需要系统里有 `ffmpeg`（任意格式转 16 kHz 单声道）。
+
+### 2. 模型（不入库，需自行下载）
+
+四个模型都来自 ModelScope，权重不进仓库：
+
+```python
+from modelscope import snapshot_download
+
+snapshot_download("iic/speech_fsmn_vad_zh-cn-16k-common-pytorch")              # VAD
+snapshot_download("iic/speech_campplus_sv_zh-cn_16k-common")                   # 声纹
+snapshot_download("iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online")  # 流式 ASR
+snapshot_download("iic/speech_frcrn_ans_cirm_16k")                             # 降噪（可选）
+```
+
+把下载后的实际目录填进配置：
+
+```bash
+cp models.example.json models.json     # 再把 vad / spk / asr / frcrn 四项改成你的路径
+```
+
+### 3. 跑一条音频
+
+```bash
+python run.py meeting.wav --models-config models.json -o meeting.json
+```
+
+`run.py` 走的是 **c1 基线路径**（单人 / 双人场景，可选 FRCRN 降噪后再分离），
+适合先把环境和模型跑通、确认没装错。
+
+**多人会议**走生产入口 `streaming_asr/claude_a2_v12.py` 的 `diarize(wav, models)`——
+2.0 秒长窗定身份、0.6 秒短窗找换人边界。目前主要通过 8735 对比台调用，
+也可以直接 import（`streaming_asr/` 不是包，用路径注入）：
+
+```python
+import sys
+sys.path.insert(0, "streaming_asr")
+from web_server import get_models
+from claude_a2_v12 import diarize
+
+models = get_models(need_stream=False, need_offline=False)   # 只加载 VAD + 声纹
+result = diarize("meeting.wav", models)
+```
+
+### 4. 起网页诊断台
+
+```bash
+# 对比台：多种配置并排跑同一场，看真值对照与句级分解
+python streaming_asr/web_server.py          # http://127.0.0.1:8735
+
+# 诊断台：选 K 决策链，拧 λ / min_win / cap / refine 秒级看变化
+python web/server.py                        # http://127.0.0.1:8737
+```
+
+两个服务都只监听 `127.0.0.1`，不对外。
+
+### 5. 跑测试
+
+```bash
+cd streaming_asr && python -B -m pytest -q      # 154 passed（2026-09-29 基准）
+```
+
+> 必须在 `streaming_asr/` 里跑：那里有 `pytest.ini` 设了 `testpaths`；
+> 在仓库根跑会把 `milestones/` 下的同名测试一起收进去，报 import mismatch。
+
+---
+
+## 三种用法
+
+| 场景 | 入口 | 说明 |
+|---|---|---|
+| 一条音频出结果 | `run.py` | CLI，输出 JSON |
+| 对比多条配置 | `streaming_asr/web_server.py` → 8735 | 网页并排泳道 + 真值对照 |
+| 拧选 K 参数 | `web/server.py` → 8737 | 诊断台，秒级反馈 |
+
+---
+
+## 项目结构
+
+| 目录 | 内容 |
+|---|---|
+| `streaming_asr/` | **算法主线**：v7–v12 泳道、生产入口 `claude_a2_v12.py`、DER 评分器、8735 对比台 |
+| `web/` | 选 K 诊断台（8737）：前端 + 服务 + 契约与指标校验 |
+| `scripts/evaluation/` | 评测、对照与验收脚本 |
+| `docs/` | 设计文档、交接记录、环境清单 |
+| `artifacts/` | 实测记录与 JSON 产物 |
+| `milestones/`、`archive/` | 历史版本归档（**只读**） |
+
+---
+
+## 已知边界
+
+引用这些数字时必须一并声明：
+
+- **单通道天花板**：说话人重叠时单标签输出必然错一部分。分离式提纯已尝试并否证
+  （ClearVoice MossFormer2_SS 在轮替对话上退化成对半拆）。
+- **参考里多是小说话人**：53 个短发言者时长占比 <5%、中位 2.0 秒；把"参考全人数"
+  当已知 K 会造出假收益。
+- **DER 口径**：union 分母（md-eval 口径），并人落在 `confusion` 而非 FA。
+- **重叠率是区间级上界**：按标注区间相交算，不能当帧级重叠率引用。
+- **数据不入库**：AISHELL-4 需自行从 [OpenSLR SLR111](https://www.openslr.org/111/) 下载。
+
+---
+
+## 文档
 
 | 文件 | 内容 |
 |---|---|
-| `docs/HANDOFF.md` | **最新**。unlocked 的主指标收口（+8.8，非样本外）+ 残差归因翻转（「剩下是聚类可分性」不成立） |
-| `docs/交接文档_1008_过分割涨分证伪.md` | 过分割涨分**一半成立**（4 真 / 1 假 / 7 零收益）+ 换尺子重跑，最优 k 从 10 → 6 |
-| `docs/交接文档_0930b_大簇拆分.md` | 大簇拆分收益**指标失败**（gain 与 oracle 近乎正交，精确率 0.35） |
-| `docs/交接文档_0930.md` | 零模型诊断链：三道锁 / 小簇性质 / 候选有效性 |
-| `docs/交接文档_092902.md` | OCR 复审第二轮：3 处静默失真 + 8 条 medium，含"明确不修的"及理由 |
-| `docs/交接文档_0929.md` | K 上限修复的代价量化、A 的定位改写、六处被数据推翻的判断 |
-| `docs/交接文档_0928.md` | K 上限 bug 的**发现过程**（含路径等价检查方法论） |
-| `docs/交接文档_0924.md` | 句子级主指标的定义草案与三步计划 |
-| `artifacts/v13_交付合并表.md` | 交付数字 + 证据索引（含物理边界与未验证项） |
-| `artifacts/过分割涨分证伪.html` | **本轮结论的分析页**（浏览器直接打开） |
-| `artifacts/v13_会话发现_20260923.md` | 该会话实测记录 |
-| `docs/环境清单.md` | 绝对路径与本机未装的备选模型 |
+| `docs/HANDOFF.md` | 最新交接与主指标收口 |
+| `docs/README_交接版_20261016.md` | 本 README 改写前的完整交接版（保留原样） |
+| `docs/环境清单.md` | 绝对路径、本机未装的备选模型 |
+| `docs/交接文档_*.md` | 各轮次的结论与"被数据推翻的判断" |
 
-> 交接文档（`交接文档_09*.md` / `HANDOFF.md`）**自 2026-10-08 起统一在 `docs/`**，
-> 不再放仓库根。根目录只留 `README.md`。
-
-**新对话开场**：先读 `docs/HANDOFF.md`，再按 `交接文档_1008_过分割涨分证伪` →
-`0930b_大簇拆分` → `0930` → `092902` → `0929` → `0928` 上溯，**先复现再采信**：
-
-```bash
-cd streaming_asr && python -B -m pytest -q                              # 154 passed
-python -B -m pytest tests/test_k_cap_dispatch.py -q                     # K 上限修复的回归
-python -B -m pytest tests/test_rescue_replacement.py -q                 # rescue 替换控制流
-cd .. && python -u -B scripts/evaluation/probe_step_a_baseline.py       # 四口径证据链（零模型）
-PYTHONIOENCODING=utf-8 python -u -B \
-    scripts/evaluation/probe_unlocked_sentence.py --min-wins 2,3,4 --selfcheck   # 主指标，秒级
-```
-
-> ⚠️ 跑**真实路径**（`probe_e2e_unlocked2.py`）是 **21 分钟/场**，别拿它做扫描。
-> 句级口径走缓存即可（`probe_path_equiv` 已验证等价）。
->
-> ⚠️ **建缓存时退出码 1 不代表失败**：门限自检的参照
-> （`v13_ab_dev_results.json`）**只覆盖 dev 12 场**，所以 train_L 与 holdout 的场次
-> 全部会报"不在参照里"，最后 `SystemExit(1)`——**此时 npz 与 manifest 已经写完**。
-> 这两批缓存的门限自检**是空的**（`--check-only` 复算的是同一批 VAD 区间，
-> 只验确定性、不验 VAD 本身）。要补真正的门限验证，得先按同口径跑
-> `probe_ab_dev` 生成覆盖该 cohort 的参照。
+> `docs/` 里的交接记录保留了**主动标注的未验证项**（"待验证假设""不得引用"）。
+> 那是工程记录，不是对外结论；对外引用请只看本页「效果」一节。
 
 ---
 
-## 外部依赖（不入库，需自行准备）
+## 配套系统
 
-### 数据
+本仓库只负责"谁说的"。完整链路还包括：
 
-| 项 | 路径 | 说明 |
-|---|---|---|
-| AISHELL-4 test | `D:\yinp\AISHELL-4\data\test\` | 20 场、8 通道、12.7 小时；本项目**只读 ch0** |
-| 嵌入缓存 | `D:\yinp\AISHELL-4\_v13_spike\cache\` | 2.0s 窗 CAM++ 嵌入，探针的零推理前提 |
-| 生产门缓存 | `...\_v13_spike\cache\probe\<场次>\{main,refine,rescue}.npz` | `build_probe_cache.py` 生成 |
-| VAD 区间缓存 | `...\_v13_spike\cache\vad\` | `cache_vad_intervals.py` 生成，只需一次 |
+- 流式 VAD + Paraformer 增量解码，实时上屏草稿；
+- 句尾锁定后异步 LLM 同音字纠错；
+- 会后离线二遍重编码出终稿；
+- 会议前端与说话人徽章渲染。
 
-数据下载：OpenSLR SLR111 <https://www.openslr.org/111/>。
-
-⚠️ **生产门缓存与 RTTM 门缓存窗集不同、不可混用**（见 `docs/交接文档_0928.md`）。
-`build_probe_cache.py` **无参数 = 重建既有全部场次**（约 35 分钟）；只重建三场须显式传 `--meetings`。
-
-### 模型（走 ModelScope 缓存，不入库）
-
-- **CAM++ 声纹**：`iic/speech_campplus_sv_zh-cn_16k-common`
-- **FSMN VAD**：本机用的是**调过的本地副本**（`speech_noise_thres=0.7`），
-  共享缓存是 0.6 且会把语音并成连续段。路径见 `streaming_asr/web_server.py` 的 `VAD_LOCAL`。
-  ⚠ 本机 funasr 是魔改版：**不显式传 `max_end_silence_time` 时 `speech_noise_thres` 失效**。
-
-### 环境
-
-两个 conda 环境：`funasr`（主链路）、`3d-speaker`（CAM++）。
+这套链路的延迟账本、chunk / 端点阈值的对拍数据、以及前端演示页在配套仓库。
 
 ---
 
-## 目录
+## 致谢
 
-| 目录/文件 | 内容 |
-|---|---|
-| `streaming_asr/` | **算法主线**：v7–v12 泳道、`der.py`（DER 评分器）、`web_server.py`（8735 测试台）、`tests/` |
-| `scripts/evaluation/` | **评估、对照与验收脚本**（当前主战场，含 `unlocked_selector.py`、`build_probe_cache.py`、`probe_*.py`） |
-| `scripts/batch/`、`scripts/diagnostics/`、`scripts/audio/` | 批量推理、一次性诊断、音频处理 |
-| `artifacts/` | 实测记录、交付表与 JSON 产物 |
-| `docs/` | **交接文档**（`交接文档_09*.md` / `HANDOFF.md`）、音频位置与复现入口、历史计划、工作日志、环境清单 |
-| `milestones/` | 版本归档（**只读，勿改**） |
-| `archive/` | 退役产物：`legacy_versions/`（c1 旧版 py）、`legacy_docs/`、`big_output/`（大体积 gitignore 产物） |
-| `dsh_line/` | DeepSeek 科研线的交接与脚本（**只读，勿改**） |
-| `eval_dsh/` | DSH 对比用的真值 `ground_truth.json`（**活引用**，多处脚本读它） |
-| `not_mind/` | 与本项目无关（**只读，勿改**） |
-
-**根目录只留 `README.md` 一份文档。** 其余平铺文档已收进 `docs/`（2026-10-08）。
-
-根目录的 `.py` 分两类，**不要合并**：
-
-| 文件 | 身份 |
-|---|---|
-| `claude_a2.py` | **c1 v4**（双人核心）。`run.py` 与 `cv_ss_test/*` 从**仓库根**加载它 |
-| `a2_v2.py` | c1 v4 的分段实现。`scripts/batch/` + `scripts/diagnostics/` 的 33 个脚本从**仓库根**加载它 |
-| `streaming_asr/claude_a2.py` | **同名但不同物**：v7–v12 泳道分发器，8735 测试台走这个 |
-| `denoise_frcrn.py` / `env_detect.py` | 根目录这份是 `run.py` 用的；`streaming_asr/` 里另有一份**更新的**（含 `_chunked_infer` 分块推理） |
+- [FunASR](https://github.com/modelscope/FunASR) —— VAD、声纹与 ASR 推理
+- [ModelScope](https://modelscope.cn) —— 模型分发
+- [AISHELL-4](https://www.openslr.org/111/) —— 会议测试集
+- AliMeeting —— 说话人分离评测集
 
 ---
 
-## 已知边界（写报告必须声明）
+## License
 
-- **单通道天花板**：说话人重叠时单标签输出必然错一部分；本机无 TS-SEP。
-  分离式提纯已否证（ClearVoice MossFormer2_SS 在轮替对话上退化成对半拆）。
-- **参考里多是小说话人**：53 个"短发言者"时长占比 <5%，中位仅 2.0 秒；
-  按"参考全人数"当已知 K 会造出假收益。
-- **`der.py` 口径**：union 分母（md-eval 口径）；**并人落在 `confusion`，不在 FA**。
-- **DER 的两条口径差 69 个点**：参考是否截断到分析窗口。
-  引用任何上界数字时必须标明（`probe_fullref_truncation.py` 有对照表）。
-- **数据口径**：dev 12 场 / 前 600 秒 / 按句平均主指标、弃权计入分母、失败场次显式记录。
-  **holdout 8 场与 train_L 未按本轮新口径作迁移结论**。
-
----
-
-# 里程碑归档
-
-本仓库根目录与各归档目录保存历史里程碑，各目录自带 README 与 `SHA256.json` 完整性清单。
-**归档目录只读，不要修改。**
-
-| 目录 | 日期 | 方法标识 | 内容 |
-| --- | --- | --- | --- |
-| （根目录代码） | 2026-09-08 | `claude-a2-v4-c1` | c1 v4：双人分离 + 逐段 ASR。含 `run.py`（服务器入口）、`denoise_frcrn.py`、`env_detect.py`、`vendor_pkgs/`、`request.txt`、`verify.py`、`SHA256.json` |
-| `evidence/` | 2026-09-08 | — | 该里程碑的全量评估与网页接口结果 |
-| `v12_meeting/` | 2026-09-21 | `claude-a2-v12-meeting` | v12：两级窗多说话人分离（2.0s 定身份 + 0.6s 找边界）+ 自动人数。**状态 `experimental`**，未替换 v7/v4 基线 |
-| `milestones/c1_v13_ab_eval_20260924/` | 2026-09-24 | — | v13 A/B 评估快照 |
-| `milestones/c1_v13_ab_eval_rev1_20260929/` | 2026-09-29 | — | v13 评估修订快照（含修复前产物） |
-
-`v12_meeting/` 相对 v7 在 5 个三人文件上加权轮次准确率 +0.073，但**自动人数在长会议上
-仍是首要缺口** —— 详见 `v12_meeting/README.md` 的「已知缺口」。
-
-> 归档数字是**当时口径**的产物，不要与当前口径的数字混用。当前结论一律以本节之前的
-> 正文与 `交接文档_09*.md` 为准。
+**尚未确定。** 在补上 `LICENSE` 之前，默认保留所有权利，他人不可直接复用。
+若计划开源，建议 MIT 或 Apache-2.0（后者带专利授权，更适合含模型推理的项目）。

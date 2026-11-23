@@ -413,7 +413,7 @@ def test_offline_second_pass_failure_keeps_live_text(tmp_path):
     )
 
     assert obj["utterances"][0]["final_text"] is None
-    assert obj["turns"][0]["text"] == "你好"
+    assert obj["turns"][0]["text"] == "你好。"
     assert not (session_dir / "final_text.json").exists()
 
 

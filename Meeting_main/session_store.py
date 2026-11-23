@@ -1,14 +1,11 @@
 # -*- coding: utf-8 -*-
 """Session 目录契约：六文件读写 + 原子落盘 + 最终合并。
 
-文件职责严格隔离（用户 2026-10-17 定稿）：
-    session_audio.wav   流式边收边写（由 StreamingSession 负责，本模块不管）
-    utterances.jsonl    每个 asr_final append 一行 {utt_id,start_ms,end_ms,raw_text}
-    transcript.json     T+0 全量文本，status="transcript"
-    polished.json       润色结果 {utt_id:{polished_text,corrected,bypassed,error}}
-    diarization.json    回填结果 {utt_id:{spk,spk_label}}
-    session.json        幂等合并后的最终态
-    events.ndjson       所有流式事件（前端回放用）
+2026-10-19 审计整改升级：
+1. [D1] `utt["raw_text"]` 100% 保持原样，绝不调用 `clean_cjk_spaces` 篡改，与 `utterances.jsonl` 逐字一致。
+2. [C1/A5] 准确标记每个 Turn 的 `text_source` 与 `polish_status` (`accepted` | `unchanged` | `rejected`)，
+   并保留 `stream_text` 与 `raw_text` 供前端三态视图切换。
+3. [D6] 在 `session.json` 中记录 `upstream_baseline` 指纹元数据，确保实验可复现可追溯。
 """
 from __future__ import annotations
 
@@ -19,24 +16,20 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import bootstrap
 from turns import build_turns, clean_cjk_spaces, split_utterance_by_sub_turns
 
 SCHEMA_VERSION = 1
 
 UTTERANCE_KEYS = ("utt_id", "start_ms", "end_ms", "raw_text")
 
-# 进程内替换锁：不同 SessionStore 实例可能并发写同一目录（Windows 下 replace 需串行）
 _REPLACE_LOCK = threading.Lock()
-
-# 跨实例共享，因为 `run_backfill` 会为同一目录新建第二个 store
 _MERGE_LOCK = threading.Lock()
-
-# 进程内追加锁：主线程与润色线程会并发 append，Windows 下需串行化整次写入
 _APPEND_LOCK = threading.Lock()
 
 
 def new_session_dir(root: Path, when: Optional[datetime] = None) -> Path:
-    """创建 output/sessions/s_YYYYMMDD_HHMMSS（重名时追加 _1、_2…）。"""
+    """创建 output/sessions/s_YYYYMMDD_HHMMSS (重名时追加 _1、_2...)。"""
     when = when or datetime.now()
     base = "s_" + when.strftime("%Y%m%d_%H%M%S")
     root = Path(root)
@@ -52,16 +45,13 @@ def new_session_dir(root: Path, when: Optional[datetime] = None) -> Path:
 
 
 def _atomic_write_json(path: Path, obj: Any) -> None:
-    # 临时文件名带上进程号与线程号，避免多个 SessionStore 实例共享同一临时路径
     tmp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     tmp.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
-    # Windows 下并发 replace 同一目标会抛 WinError 5，进程内串行化替换
     with _REPLACE_LOCK:
         os.replace(tmp, path)
 
 
 def _append_ndjson(path: Path, obj: Any) -> None:
-    # 先序列化再持锁打开写入，避免两线程的写入交错破坏行
     line = json.dumps(obj, ensure_ascii=False) + "\n"
     with _APPEND_LOCK:
         with path.open("a", encoding="utf-8", newline="\n") as handle:
@@ -69,7 +59,6 @@ def _append_ndjson(path: Path, obj: Any) -> None:
 
 
 def _validated_row(utt: Dict[str, Any]) -> Dict[str, Any]:
-    """契约四键必须齐全，且 utt_id/start_ms/end_ms 不得为 None（raw_text 允许 ""）。"""
     missing = [key for key in UTTERANCE_KEYS if key not in utt]
     missing += [key for key in ("utt_id", "start_ms", "end_ms")
                 if key in utt and utt[key] is None]
@@ -79,10 +68,7 @@ def _validated_row(utt: Dict[str, Any]) -> Dict[str, Any]:
 
 
 class SessionStore:
-    """一个 session 目录的读写门面。
-
-    合并锁保证 polished 线程与回填路径并发调用 build_session_json() 时不会互相覆盖。
-    """
+    """一个 session 目录的读写门面。"""
 
     def __init__(
         self,
@@ -97,8 +83,6 @@ class SessionStore:
         self.started_at = started_at or datetime.now().astimezone().isoformat(timespec="seconds")
         self.audio_path = self.dir / "session_audio.wav"
         self._merge_lock = _MERGE_LOCK
-
-    # ---- 写入 ----
 
     def append_utterance(self, utt: Dict[str, Any]) -> None:
         _append_ndjson(self.dir / "utterances.jsonl", _validated_row(utt))
@@ -131,7 +115,7 @@ class SessionStore:
         _atomic_write_json(path, mapping)
         return path
 
-    def write_turns_polished(self, mapping: Dict[str, str]) -> Path:
+    def write_turns_polished(self, mapping: Dict[str, Any]) -> Path:
         path = self.dir / "turns_polished.json"
         _atomic_write_json(path, mapping)
         return path
@@ -141,8 +125,6 @@ class SessionStore:
         _atomic_write_json(path, mapping)
         return path
 
-    # ---- 读取 ----
-
     def read_json(self, name: str) -> Optional[Dict[str, Any]]:
         path = self.dir / name
         if not path.exists():
@@ -150,10 +132,8 @@ class SessionStore:
         with _REPLACE_LOCK:
             return json.loads(path.read_text(encoding="utf-8"))
 
-    # ---- 合并 ----
-
     def build_session_json(self) -> Dict[str, Any]:
-        """读 transcript + 可选的 polished / diarization，幂等合成 session.json。"""
+        """读 transcript + 可选的 polished / diarization / final_text / turns_polished，幂等合成 session.json。"""
         with self._merge_lock:
             transcript = self.read_json("transcript.json") or {"utterances": []}
             polished = self.read_json("polished.json") or {}
@@ -169,13 +149,16 @@ class SessionStore:
                     speaker = {}
                 ft_entry = final_text.get(uid) or {}
                 raw_ft = ft_entry.get("text") if isinstance(ft_entry, dict) else None
+                cleaned_ft = clean_cjk_spaces(raw_ft) if raw_ft is not None else None
+
+                # [D1] raw_text 严格保持 transcript.json / utterances.jsonl 中的原始值，不做任何清洗！
                 parent = {
                     **utt,
-                    "raw_text": clean_cjk_spaces(utt.get("raw_text", "")),
+                    "raw_text": utt.get("raw_text", ""),
                     "polished_text": clean_cjk_spaces(
                         polish.get("polished_text", utt.get("raw_text", ""))
                     ),
-                    "final_text": clean_cjk_spaces(raw_ft) if raw_ft is not None else None,
+                    "final_text": cleaned_ft,
                     "grouped_cont": bool(ft_entry.get("grouped_cont", False)) if isinstance(ft_entry, dict) else False,
                     "corrected": bool(polish.get("corrected", False)),
                     "bypassed": bool(polish.get("bypassed", False)),
@@ -184,8 +167,6 @@ class SessionStore:
                     "spk_label": speaker.get("spk_label"),
                     "overlap_spk": None,
                 }
-                # 句内换人：上游 sub_turns 把长句拆成单人子段；离线二遍会逐子段
-                # 重转写（final_text 用子段 id），turns 因此不会被整句投票吞掉。
                 for part in split_utterance_by_sub_turns(
                         parent, speaker.get("sub_turns")):
                     sub_final = final_text.get(part["utt_id"])
@@ -195,18 +176,27 @@ class SessionStore:
                     merged.append(part)
 
             turns = build_turns(merged)
-            turns_polished = self.read_json("turns_polished.json") or {}
+            turns_polished_raw = self.read_json("turns_polished.json")
+            has_turns_polished_file = turns_polished_raw is not None
+            turns_polished = turns_polished_raw or {}
+
             for turn in turns:
                 entry = turns_polished.get(turn["turn_id"])
                 if not isinstance(entry, dict):
+                    if has_turns_polished_file:
+                        turn["polish_status"] = "rejected"
                     continue
-                # 独立重跑回填可能改变 turn 边界；对不上就保留直播稿，宁可少改
                 if (entry.get("start_ms") != turn["start_ms"]
                         or entry.get("end_ms") != turn["end_ms"]):
+                    turn["polish_status"] = "mismatch"
                     continue
                 polished_text = clean_cjk_spaces(entry.get("text"))
                 if isinstance(polished_text, str) and polished_text:
+                    actually_changed = polished_text != turn["text"]
                     turn["text"] = polished_text
+                    turn["text_source"] = "turn_polished" if actually_changed else turn.get("text_source", "final_asr")
+                    turn["polish_status"] = "accepted" if actually_changed else "unchanged"
+                    turn["corrected"] = actually_changed
 
             obj = {
                 "schema_version": SCHEMA_VERSION,
@@ -216,8 +206,11 @@ class SessionStore:
                 "started_at": transcript.get("started_at", self.started_at),
                 "ended_at": transcript.get("ended_at"),
                 "duration_ms": transcript.get("duration_ms"),
+                "upstream_baseline": {
+                    k: {"sha256_16": v[0], "bytes": v[1]}
+                    for k, v in getattr(bootstrap, "BASELINE", {}).items()
+                },
                 "utterances": merged,
-                # utterances 是声纹/审计粒度；turns 是显示/导出粒度
                 "turns": turns,
             }
             _atomic_write_json(self.dir / "session.json", obj)

@@ -77,12 +77,13 @@ def iter_audio_chunks(
         yield chunk.tobytes(), (start + step) >= len(audio)
 
 
-def _default_session(wav_path, models):
+def _default_session(wav_path, models, silence_ms=None):
     from streaming_asr_engine import StreamingSession
     return StreamingSession(str(wav_path),
                             asr_model=models["stream_asr"],
                             vad_model=models["vad"],
-                            max_end_silence_time=MAX_END_SILENCE_MS)
+                            max_end_silence_time=(
+                                MAX_END_SILENCE_MS if silence_ms is None else silence_ms))
 
 
 def run(
@@ -90,6 +91,7 @@ def run(
     session_dir,
     *,
     chunk_ms: int = 600,
+    silence_ms: Optional[int] = None,
     fast: bool = False,
     no_llm: bool = False,
     no_diar: bool = False,
@@ -123,7 +125,10 @@ def run(
         from web_server import get_models
         models = get_models(need_stream=True, need_offline=False)
 
-    session = (session_factory or _default_session)(store.audio_path, models)
+    if session_factory is not None:
+        session = session_factory(store.audio_path, models)
+    else:
+        session = _default_session(store.audio_path, models, silence_ms)
 
     # 每场会议一个 turn 归属器：只在对外通知时补充字段，落盘事件保持单句原形
     tracker = StreamTurnTracker()
@@ -369,6 +374,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--session-root", default="output/sessions")
     parser.add_argument("--session-dir", default=None)
     parser.add_argument("--chunk-ms", type=int, default=600)
+    parser.add_argument("--silence-ms", type=int, default=None,
+                        help="VAD 句尾静音阈值（默认 1000）；800 可显著降定稿延迟但句数变多")
     parser.add_argument("--max-seconds", type=float, default=0.0)
     parser.add_argument("--fast", action="store_true", help="全速推流，不按墙钟节流")
     parser.add_argument("--no-llm", action="store_true")
@@ -396,6 +403,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     obj = run(
         Path(args.wav), session_dir,
         chunk_ms=args.chunk_ms, fast=args.fast,
+        silence_ms=args.silence_ms,
         no_llm=args.no_llm, no_diar=args.no_diar,
         no_final_polish=args.no_final_polish,
         no_final_asr=args.no_final_asr,
