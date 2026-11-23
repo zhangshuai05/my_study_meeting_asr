@@ -52,8 +52,8 @@ flowchart LR
 ### 1. 环境
 
 ```bash
-git clone https://github.com/zhangshuai05/wodexuexi.git
-cd wodexuexi/Meeting_main
+git clone https://github.com/zhangshuai05/my_study_meeting_asr.git
+cd my_study_meeting_asr/Meeting_main
 
 conda create -n funasr python=3.12 -y && conda activate funasr
 pip install -r ../diarization_cl-main/requirements.txt
