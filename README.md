@@ -7,8 +7,7 @@
 
 `Python 3.12` · `CPU only` · `离线` · `Windows / Linux`
 
-<!-- 截图放这里：docs/images/demo.png -->
-<!-- ![demo](docs/images/demo.png) -->
+![实时会议记录](docs/images/demo.png)
 
 ---
 
